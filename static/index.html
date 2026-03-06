@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GISL Schools Management System</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+
+<!-- ═══════════════ LOGIN PAGE ═══════════════ -->
+<div id="login-page" class="login-page">
+  <div class="login-card">
+    <div class="login-logo">🏫</div>
+    <h1 class="login-title">GISL Schools</h1>
+    <p class="login-subtitle">Management System — Sign in to continue</p>
+    <div id="login-error" class="alert alert-error hidden"></div>
+    <form id="login-form">
+      <div class="form-group">
+        <label>Email Address</label>
+        <input type="email" id="login-email" placeholder="admin@school.com" required />
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="login-password" placeholder="••••••••" required />
+      </div>
+      <button type="submit" class="btn btn-primary btn-full" id="login-btn">Sign In</button>
+    </form>
+  </div>
+</div>
+
+<!-- ═══════════════ APP SHELL ═══════════════ -->
+<div id="app" class="app hidden">
+
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <span class="sidebar-logo">🏫</span>
+      <div>
+        <div class="sidebar-title">GISL Schools</div>
+        <div class="sidebar-subtitle" id="sidebar-role">Admin</div>
+      </div>
+    </div>
+    <nav class="sidebar-nav">
+      <a class="nav-item active" data-page="dashboard" onclick="navigate('dashboard')">
+        <span class="nav-icon">📊</span> Dashboard
+      </a>
+      <a class="nav-item" data-page="pupils" onclick="navigate('pupils')">
+        <span class="nav-icon">👨‍🎓</span> Pupils
+      </a>
+      <a class="nav-item admin-only" data-page="teachers" onclick="navigate('teachers')">
+        <span class="nav-icon">👩‍🏫</span> Teachers
+      </a>
+      <a class="nav-item admin-only" data-page="classes" onclick="navigate('classes')">
+        <span class="nav-icon">🏛️</span> Classes
+      </a>
+      <a class="nav-item" data-page="results" onclick="navigate('results')">
+        <span class="nav-icon">📝</span> Results
+      </a>
+      <a class="nav-item admin-only" data-page="fees" onclick="navigate('fees')">
+        <span class="nav-icon">💰</span> Fees
+      </a>
+      <a class="nav-item admin-only" data-page="archive" onclick="navigate('archive')">
+        <span class="nav-icon">📦</span> Archive
+      </a>
+      <a class="nav-item admin-only" data-page="settings" onclick="navigate('settings')">
+        <span class="nav-icon">⚙️</span> Settings
+      </a>
+      <!-- Parent-only nav -->
+      <a class="nav-item parent-only" data-page="parent-home" onclick="navigate('parent-home')">
+        <span class="nav-icon">👨‍👩‍👧</span> My Children
+      </a>
+      <a class="nav-item parent-only" data-page="parent-notices" onclick="navigate('parent-notices')">
+        <span class="nav-icon">📢</span> Notices
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="user-avatar">A</div>
+        <div>
+          <div class="user-name" id="user-name">Admin</div>
+          <div class="user-email" id="user-email">admin@school.com</div>
+        </div>
+      </div>
+      <button class="btn-logout" onclick="logout()">Sign Out</button>
+    </div>
+  </aside>
+
+  <!-- Mobile nav toggle -->
+  <button class="mobile-menu-btn" id="mobile-menu-btn" onclick="toggleSidebar()">☰</button>
+
+  <!-- Main Content -->
+  <main class="main-content">
+
+    <!-- ── DASHBOARD ── -->
+    <section id="page-dashboard" class="page active">
+      <div class="page-header">
+        <h2>Dashboard</h2>
+        <div class="term-badge" id="current-term-badge">Loading...</div>
+      </div>
+      <div class="stats-grid" id="stats-grid">
+        <div class="stat-card blue"><div class="stat-num" id="stat-pupils">—</div><div class="stat-label">Active Pupils</div></div>
+        <div class="stat-card green"><div class="stat-num" id="stat-teachers">—</div><div class="stat-label">Teachers</div></div>
+        <div class="stat-card purple"><div class="stat-num" id="stat-classes">—</div><div class="stat-label">Classes</div></div>
+        <div class="stat-card orange"><div class="stat-num" id="stat-archived">—</div><div class="stat-label">Archived</div></div>
+      </div>
+      <div class="class-breakdown-card">
+        <h3>Classes Overview</h3>
+        <div id="class-breakdown-table"></div>
+      </div>
+    </section>
+
+    <!-- ── PUPILS ── -->
+    <section id="page-pupils" class="page">
+      <div class="page-header">
+        <h2>Pupils</h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-secondary admin-only" onclick="exportParents()">📋 Export Parent Contacts</button>
+          <button class="btn btn-secondary admin-only" style="background:#7B1D1D;color:white;border:none" onclick="showBulkIDCardModal()">🪪 Print ID Cards</button>
+          <button class="btn btn-primary admin-only" onclick="showAddPupil()">+ Add Pupil</button>
+        </div>
+      </div>
+      <div class="toolbar">
+        <input type="text" class="search-input" id="pupil-search" placeholder="Search by name or admission no…" oninput="filterPupils()" />
+        <select id="pupil-class-filter" onchange="filterPupils()">
+          <option value="">All Classes</option>
+        </select>
+      </div>
+      <div id="pupils-list" class="table-container"><div class="loading">Loading…</div></div>
+    </section>
+
+    <!-- ── TEACHERS ── -->
+    <section id="page-teachers" class="page">
+      <div class="page-header">
+        <h2>Teachers</h2>
+        <button class="btn btn-primary" onclick="showAddTeacher()">+ Add Teacher</button>
+      </div>
+      <div id="teachers-list" class="table-container"><div class="loading">Loading…</div></div>
+    </section>
+
+    <!-- ── CLASSES ── -->
+    <section id="page-classes" class="page">
+      <div class="page-header">
+        <h2>Classes</h2>
+      </div>
+      <div id="classes-grid" class="classes-grid"><div class="loading">Loading…</div></div>
+    </section>
+
+    <!-- ── RESULTS ── -->
+    <section id="page-results" class="page">
+      <div class="page-header">
+        <h2>Results Entry</h2>
+        <div style="font-size:13px;color:var(--gray-400)">Select a class and term — all subjects load at once</div>
+      </div>
+      <div class="results-controls">
+        <div class="form-row" style="align-items:flex-end;gap:12px">
+          <div class="form-group" style="flex:1;min-width:180px">
+            <label>Class</label>
+            <select id="results-class-select" onchange="loadResultsGrid()">
+              <option value="">— Select Class —</option>
+            </select>
+          </div>
+          <div class="form-group" style="flex:1;min-width:180px">
+            <label>Term</label>
+            <select id="results-term-select" onchange="loadResultsGrid()">
+              <option value="">— Select Term —</option>
+            </select>
+          </div>
+          <button class="btn btn-primary" onclick="loadResultsGrid()" style="flex-shrink:0;height:40px;margin-bottom:0">🔄 Load Marksheet</button>
+        </div>
+      </div>
+      <div id="results-grid-container"></div>
+    </section>
+
+    <!-- ── FEES ── -->
+    <section id="page-fees" class="page">
+      <div class="page-header">
+        <h2>Fee Management</h2>
+        <button class="btn btn-primary" onclick="openFeeStructureModal()">+ Add Fee Item</button>
+      </div>
+      <div class="tab-bar">
+        <button class="tab-btn active" onclick="loadFeesTab('structure')">Fee Structure</button>
+        <button class="tab-btn" onclick="loadFeesTab('bill')">Generate Bill</button>
+      </div>
+      <div id="fees-content"></div>
+    </section>
+
+    <!-- ── ARCHIVE ── -->
+    <section id="page-archive" class="page">
+      <div class="page-header">
+        <h2>Archive</h2>
+      </div>
+      <div class="tab-bar">
+        <button class="tab-btn active" onclick="loadArchive('archived')">Archived Pupils</button>
+        <button class="tab-btn" onclick="loadArchive('graduated')">Graduated Pupils</button>
+      </div>
+      <div id="archive-list" class="table-container"><div class="loading">Loading…</div></div>
+    </section>
+
+    <!-- ── SETTINGS ── -->
+    <section id="page-settings" class="page">
+      <div class="page-header"><h2>Settings</h2></div>
+      <div class="settings-grid">
+        <div class="settings-card">
+          <h3>Academic Terms</h3>
+          <div id="terms-list"></div>
+          <button class="btn btn-secondary mt-2" onclick="showAddTerm()">+ New Term</button>
+        </div>
+        <div class="settings-card">
+          <h3>Subjects</h3>
+          <div id="subjects-list"></div>
+          <button class="btn btn-secondary mt-2" onclick="showAddSubject()">+ New Subject</button>
+        </div>
+        <div class="settings-card">
+          <h3>Parent Accounts</h3>
+          <p style="font-size:13px;color:var(--gray-500);margin-bottom:10px">Create login accounts for parents to access the parent portal.</p>
+          <div id="parent-accounts-list"><div class="loading">Loading…</div></div>
+          <button class="btn btn-secondary mt-2" onclick="openParentAccountModal()">+ Add Parent Account</button>
+        </div>
+        <div class="settings-card">
+          <h3>School Notices</h3>
+          <p style="font-size:13px;color:var(--gray-500);margin-bottom:10px">Post announcements visible to parents and/or staff in the portal.</p>
+          <div id="notices-admin-list"><div class="loading">Loading…</div></div>
+          <button class="btn btn-secondary mt-2" onclick="openNoticeModal()">+ Post Notice</button>
+        </div>
+        <div class="settings-card">
+          <h3>Change Admin Password</h3>
+          <form id="change-password-form" onsubmit="changePassword(event)">
+            <div class="form-group">
+              <label>New Password</label>
+              <input type="password" id="new-password" required minlength="6" />
+            </div>
+            <div class="form-group">
+              <label>Confirm Password</label>
+              <input type="password" id="confirm-password" required />
+            </div>
+            <button type="submit" class="btn btn-primary">Update Password</button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── PARENT HOME ── -->
+    <section id="page-parent-home" class="page">
+      <div class="page-header">
+        <h2>My Children</h2>
+        <div class="term-badge" id="parent-term-badge">—</div>
+      </div>
+      <div id="parent-children-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;padding:4px 0">
+        <div class="loading">Loading…</div>
+      </div>
+    </section>
+
+    <!-- ── PARENT CHILD DETAIL ── -->
+    <section id="page-parent-child" class="page">
+      <div class="page-header">
+        <button class="btn btn-secondary btn-sm" onclick="navigate('parent-home')" style="margin-right:8px">← Back</button>
+        <h2 id="parent-child-title">Child Name</h2>
+      </div>
+      <div class="tab-bar" id="parent-child-tabs">
+        <button class="tab-btn active" onclick="loadParentChildTab('results')">📊 Results</button>
+        <button class="tab-btn" onclick="loadParentChildTab('fees')">💰 Fees</button>
+        <button class="tab-btn" onclick="loadParentChildTab('report')">📄 Report Card</button>
+        <button class="tab-btn" onclick="loadParentChildTab('acknowledge')">✅ Acknowledge</button>
+      </div>
+      <div id="parent-child-content" style="padding:4px 0"><div class="loading">Loading…</div></div>
+    </section>
+
+    <!-- ── PARENT NOTICES ── -->
+    <section id="page-parent-notices" class="page">
+      <div class="page-header"><h2>📢 School Notices</h2></div>
+      <div id="parent-notices-list"><div class="loading">Loading…</div></div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ═══════════════ MODALS ═══════════════ -->
+<div id="modal-overlay" class="modal-overlay hidden" onclick="closeModal(event)">
+  <div class="modal" id="modal-box" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3 id="modal-title">Modal</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<!-- ID Card Window (fullscreen printable) -->
+<div id="idcard-overlay" class="id-card-overlay hidden">
+  <div class="id-card-toolbar">
+    <span style="color:white;font-weight:600;margin-right:8px">🪪 ID Card</span>
+    <button class="btn btn-primary" onclick="window.print()">🖨️ Print / Save as PDF</button>
+    <button class="btn btn-secondary" onclick="closeIDCard()">✕ Close</button>
+    <span style="color:#aaa;font-size:12px;margin-left:12px">Tip: In print dialog, set paper size to A4 and scale to fit</span>
+  </div>
+  <div class="id-card-content" id="idcard-content"></div>
+</div>
+
+<!-- Report Card Window (fullscreen printable) -->
+<div id="report-overlay" class="report-overlay hidden">
+  <div class="report-toolbar">
+    <button class="btn btn-primary" onclick="window.print()">🖨️ Print / Save as PDF</button>
+    <button class="btn btn-secondary" onclick="closeReport()">✕ Close</button>
+  </div>
+  <div id="report-content" class="report-content"></div>
+</div>
+
+<!-- Toast notifications -->
+<div id="toast" class="toast hidden"></div>
+
+<script src="/js/app.js"></script>
+</body>
+</html>
