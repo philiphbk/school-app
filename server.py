@@ -16,10 +16,17 @@ import mimetypes
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timedelta
 
-PORT = 8080
-DB_PATH = os.path.join(os.path.dirname(__file__), "school.db")
+# Railway (and most cloud platforms) inject a PORT environment variable.
+# Fall back to 8080 for local development.
+PORT = int(os.environ.get("PORT", 8080))
+
+# On Railway, mount a persistent volume at /data and set DATA_DIR=/data
+# so the database and uploads survive redeploys. Falls back to the app
+# folder for local use.
+_DATA_DIR = os.environ.get("DATA_DIR", os.path.dirname(__file__))
+DB_PATH    = os.path.join(_DATA_DIR, "school.db")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+UPLOADS_DIR = os.path.join(_DATA_DIR, "uploads")
 
 # ─── DATABASE ─────────────────────────────────────────────────────────────────
 
