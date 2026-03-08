@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>GISL Schools Management System</title>
+  <meta name="description" content="GISL Schools Management System — manage pupils, teachers, results, fees and parent communications." />
   <link rel="stylesheet" href="/css/style.css" />
 </head>
 <body>
@@ -17,12 +18,12 @@
     <div id="login-error" class="alert alert-error hidden"></div>
     <form id="login-form">
       <div class="form-group">
-        <label>Email Address</label>
-        <input type="email" id="login-email" placeholder="admin@school.com" required />
+        <label for="login-email">Email Address</label>
+        <input type="email" id="login-email" autocomplete="email" placeholder="admin@school.com" required />
       </div>
       <div class="form-group">
-        <label>Password</label>
-        <input type="password" id="login-password" placeholder="••••••••" required />
+        <label for="login-password">Password</label>
+        <input type="password" id="login-password" autocomplete="current-password" placeholder="••••••••" required />
       </div>
       <button type="submit" class="btn btn-primary btn-full" id="login-btn">Sign In</button>
     </form>
@@ -41,36 +42,36 @@
         <div class="sidebar-subtitle" id="sidebar-role">Admin</div>
       </div>
     </div>
-    <nav class="sidebar-nav">
-      <a class="nav-item active" data-page="dashboard" onclick="navigate('dashboard')">
+    <nav class="sidebar-nav" aria-label="Main navigation">
+      <a class="nav-item active" href="#" data-page="dashboard" onclick="navigate('dashboard');return false;">
         <span class="nav-icon">📊</span> Dashboard
       </a>
-      <a class="nav-item" data-page="pupils" onclick="navigate('pupils')">
+      <a class="nav-item" href="#" data-page="pupils" onclick="navigate('pupils');return false;">
         <span class="nav-icon">👨‍🎓</span> Pupils
       </a>
-      <a class="nav-item admin-only" data-page="teachers" onclick="navigate('teachers')">
+      <a class="nav-item admin-only" href="#" data-page="teachers" onclick="navigate('teachers');return false;">
         <span class="nav-icon">👩‍🏫</span> Teachers
       </a>
-      <a class="nav-item admin-only" data-page="classes" onclick="navigate('classes')">
+      <a class="nav-item admin-only" href="#" data-page="classes" onclick="navigate('classes');return false;">
         <span class="nav-icon">🏛️</span> Classes
       </a>
-      <a class="nav-item" data-page="results" onclick="navigate('results')">
+      <a class="nav-item" href="#" data-page="results" onclick="navigate('results');return false;">
         <span class="nav-icon">📝</span> Results
       </a>
-      <a class="nav-item admin-only" data-page="fees" onclick="navigate('fees')">
+      <a class="nav-item admin-only" href="#" data-page="fees" onclick="navigate('fees');return false;">
         <span class="nav-icon">💰</span> Fees
       </a>
-      <a class="nav-item admin-only" data-page="archive" onclick="navigate('archive')">
+      <a class="nav-item admin-only" href="#" data-page="archive" onclick="navigate('archive');return false;">
         <span class="nav-icon">📦</span> Archive
       </a>
-      <a class="nav-item admin-only" data-page="settings" onclick="navigate('settings')">
+      <a class="nav-item admin-only" href="#" data-page="settings" onclick="navigate('settings');return false;">
         <span class="nav-icon">⚙️</span> Settings
       </a>
       <!-- Parent-only nav -->
-      <a class="nav-item parent-only" data-page="parent-home" onclick="navigate('parent-home')">
+      <a class="nav-item parent-only" href="#" data-page="parent-home" onclick="navigate('parent-home');return false;">
         <span class="nav-icon">👨‍👩‍👧</span> My Children
       </a>
-      <a class="nav-item parent-only" data-page="parent-notices" onclick="navigate('parent-notices')">
+      <a class="nav-item parent-only" href="#" data-page="parent-notices" onclick="navigate('parent-notices');return false;">
         <span class="nav-icon">📢</span> Notices
       </a>
     </nav>
@@ -87,7 +88,7 @@
   </aside>
 
   <!-- Mobile nav toggle -->
-  <button class="mobile-menu-btn" id="mobile-menu-btn" onclick="toggleSidebar()">☰</button>
+  <button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Open navigation menu" onclick="toggleSidebar()">☰</button>
 
   <!-- Main Content -->
   <main class="main-content">
@@ -246,7 +247,7 @@
         <h2>My Children</h2>
         <div class="term-badge" id="parent-term-badge">—</div>
       </div>
-      <div id="parent-children-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;padding:4px 0">
+      <div id="parent-children-grid" class="parent-children-grid">
         <div class="loading">Loading…</div>
       </div>
     </section>

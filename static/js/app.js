@@ -148,8 +148,10 @@ async function loadReferenceData() {
 
     // Populate class filter on pupils page
     const classFilter = document.getElementById('pupil-class-filter');
-    classFilter.innerHTML = '<option value="">All Classes</option>' +
-      classes.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+    if (classFilter) {
+      classFilter.innerHTML = '<option value="">All Classes</option>' +
+        classes.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+    }
 
     // Populate results selects
     populateResultsSelects();
@@ -306,7 +308,7 @@ function showAddPupil() {
 function editPupil(id) {
   const pupil = appData.pupils.find(p => p.id === id);
   if (pupil) openModal('Edit Pupil', pupilForm(pupil));
-  else apiFetch(`/api/pupils/${id}`).then(p => openModal('Edit Pupil', pupilForm(p)));
+  else apiFetch(`/api/pupils/${id}`).then(p => openModal('Edit Pupil', pupilForm(p))).catch(err => showToast('Error loading pupil: ' + err.message, 'error'));
 }
 
 function pupilForm(pupil) {
@@ -2417,7 +2419,7 @@ async function generatePupilIDCard(pupilId) {
 }
 
 async function generateTeacherIDCard(teacherId, teacherName) {
-  const initials = teacherName.split(' ').map(w => w[0]).join('').substring(0, 2).toUpperCase();
+  const initials = (teacherName || 'ST').split(' ').filter(w => w.length > 0).map(w => w[0]).join('').substring(0, 2).toUpperCase() || 'ST';
   const certText = `This is to certify that the person whose photograph appears on this card is a registered staff of this school. Please come with this ID when resuming at work. If found, drop in any mailbox or return to the school.`;
   const front = idCardFront(teacherName, 'Staff', '', initials);
   const back = idCardBack(certText);
@@ -2894,7 +2896,7 @@ async function loadParentNotices() {
           </div>
           <span style="font-size:24px">📢</span>
         </div>
-        <div style="margin-top:10px;font-size:13px;color:#374151;line-height:1.6;border-top:1px solid var(--gray-100);padding-top:10px">${n.body.replace(/\n/g,'<br/>')}</div>
+        <div style="margin-top:10px;font-size:13px;color:#374151;line-height:1.6;border-top:1px solid var(--gray-100);padding-top:10px">${n.body.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br/>')}</div>
       </div>`).join('');
   } catch (err) {
     el.innerHTML = `<div class="empty">Failed to load: ${err.message}</div>`;
@@ -3081,7 +3083,7 @@ async function saveNotice(event, noticeId) {
     target: fd.get('target') || 'all'
   };
   if (noticeId && fd.get('is_active') !== null) {
-    payload.is_active = parseInt(fd.get('is_active'));
+    payload.is_active = fd.get('is_active') === '1' ? 1 : 0;
   }
   try {
     if (noticeId) {

@@ -19,6 +19,10 @@
 ✅ 3-term academic year structure
 ✅ Separate Admin and Teacher login roles
 ✅ 11 standard Nigerian primary school subjects pre-loaded
+✅ Fee management: set fee structures per class/term, generate bills, record payments
+✅ Parent portal: parents log in to view results, fees, download report cards, and acknowledge
+✅ School notices: post announcements visible to parents and/or staff
+✅ ID card generation and printing for pupils
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -109,6 +113,13 @@ TEACHER ACCESS:
     - They can only see their assigned class
     - They can enter results for their class
     - They can view pupil profiles in their class
+    - They can change their own password via Settings
+
+PARENT ACCESS:
+    - Go to Settings → Parent Accounts → Add Parent Account
+    - Give the parent their email/password
+    - Parents log in at the same URL and see a parent-only portal
+    - They can view their child's results, fees, report cards, and post acknowledgements
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -146,17 +157,14 @@ TEACHER ACCESS:
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- VERSION 2 IDEAS (future improvements)
+ FUTURE IMPROVEMENT IDEAS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  • Parent portal: parents log in to view their child's results
-  • Fee management: track school fees, generate receipts
   • Attendance register: daily attendance tracking per class
   • Bulk pupil import from Excel/CSV
   • SMS/Email notifications to parents
   • Bulk report card printing for entire class
   • Secondary school expansion (JSS 1–3, SS 1–3)
-  • Put the app online so it's accessible from anywhere
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

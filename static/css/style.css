@@ -26,6 +26,10 @@
   --gray-700: #374151;
   --gray-800: #1f2937;
   --gray-900: #111827;
+  --info: #0891b2;
+  --info-light: #e0f2fe;
+  --secondary: #6b7280;
+  --transition: background .15s ease;
   --sidebar-w: 240px;
   --radius: 8px;
   --shadow-sm: 0 1px 2px rgba(0,0,0,.05);
@@ -528,6 +532,14 @@ select:focus { border-color: var(--primary); }
   .id-card-pair { break-inside: avoid; page-break-inside: avoid; }
 }
 
+/* ── PARENT CHILDREN GRID ── */
+.parent-children-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  padding: 4px 0;
+}
+
 /* ── RESPONSIVE ── */
 @media (max-width: 768px) {
   .sidebar { transform: translateX(-100%); }
@@ -545,71 +557,48 @@ select:focus { border-color: var(--primary); }
   .settings-grid { grid-template-columns: 1fr; }
 }
 
-/* ── NEW COMPONENT STYLES ────────────────────────────────────────────────── */
-
-/* Small button variant */
-.btn-sm {
-  padding: 5px 10px;
-  font-size: 0.85rem;
+@media (max-width: 480px) {
+  .stats-grid { grid-template-columns: 1fr; }
+  .page-header { flex-direction: column; align-items: flex-start; }
+  .btn { font-size: 12px; padding: 6px 12px; }
 }
+
+/* ── ADDITIONAL COMPONENT STYLES ─────────────────────────────────────────── */
+/* Note: .btn-sm, .badge, .btn-icon, .alert are already defined above.       */
+/* This section only adds unique variants not present in the core styles.     */
 
 /* Button group */
 .btn-group { display: flex; gap: 10px; }
 
-/* Badges */
-.badge {
-  display: inline-block;
-  padding: 4px 10px;
-  border-radius: 20px;
-  font-size: 0.8rem;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.badge-success  { background: #d4edda; color: #155724; }
-.badge-active   { background: #d4edda; color: #155724; }
-.badge-warning  { background: #fff3cd; color: #856404; }
-.badge-danger   { background: #f8d7da; color: #721c24; }
-.badge-info     { background: #d1ecf1; color: #0c5460; }
-.badge-primary  { background: #cce5ff; color: var(--primary); }
-
-/* Icon-only circular buttons */
-.btn-icon {
-  width: 35px; height: 35px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  cursor: pointer; border: none; transition: var(--transition);
-}
-.btn-icon-view   { background: var(--info);    color: white; }
-.btn-icon-edit   { background: var(--warning); color: var(--gray-900); }
-.btn-icon-delete { background: var(--danger);  color: white; }
-.btn-icon-archive { background: var(--secondary); color: white; }
-.btn-icon-view:hover    { background: #138496; }
-.btn-icon-edit:hover    { background: #e0a800; }
-.btn-icon-delete:hover  { background: #c82333; }
-.btn-icon-archive:hover { background: #2a4365; }
-
-/* Alert banners (used for inline form errors) */
-.alert {
-  padding: 12px 15px;
-  border-radius: var(--radius);
-  margin-bottom: 16px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.alert-error   { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-.alert-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-.alert-warning { background: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
-.alert-danger  { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-.alert-info    { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
-
 /* Action button row */
 .action-buttons { display: flex; gap: 8px; }
 
-/* Empty / loading inline states */
-.empty-state {
-  text-align: center; padding: 40px 20px; color: var(--gray-400);
-}
+/* Extra badge colour variants (core badge shape defined above) */
+.badge-success  { background: var(--success-light); color: var(--success); }
+.badge-warning  { background: var(--warning-light); color: var(--warning); }
+.badge-danger   { background: var(--danger-light);  color: var(--danger);  }
+.badge-info     { background: var(--info-light);    color: var(--info);    }
+.badge-primary  { background: var(--primary-light); color: var(--primary); }
+
+/* Coloured icon-button variants (base .btn-icon shape defined above) */
+.btn-icon-view    { background: var(--info);      color: white; }
+.btn-icon-edit    { background: var(--warning);   color: var(--gray-900); }
+.btn-icon-delete  { background: var(--danger);    color: white; }
+.btn-icon-archive { background: var(--secondary); color: white; }
+.btn-icon-view:hover,
+.btn-icon-edit:hover,
+.btn-icon-delete:hover,
+.btn-icon-archive:hover { filter: brightness(0.88); }
+
+/* Extra alert variants (base .alert and .alert-error/.alert-success defined above) */
+.alert-warning { background: var(--warning-light); color: var(--warning); border: 1px solid #fcd34d; }
+.alert-danger  { background: var(--danger-light);  color: var(--danger);  border: 1px solid #fca5a5; }
+.alert-info    { background: var(--info-light);    color: var(--info);    border: 1px solid #67e8f9; }
+
+/* Empty state placeholder */
+.empty-state { text-align: center; padding: 40px 20px; color: var(--gray-400); }
+
+/* Loading spinner */
 .spinner {
   width: 36px; height: 36px;
   border: 3px solid var(--gray-200);

@@ -606,22 +606,25 @@ def handle_create_teacher(handler, user, body):
     send_json(handler, dict(teacher), 201)
 
 def handle_update_teacher(handler, user, teacher_id, body):
-    if user["role"] != "admin":
+    is_self_update = str(user["id"]) == str(teacher_id)
+    if not is_self_update and user["role"] != "admin":
         return send_error(handler, "Not authorized", 403)
     conn = get_db()
     updates = []
     values = []
-    for f in ["name","phone"]:
-        if f in body:
-            updates.append(f"{f} = ?")
-            values.append(body[f])
+    # Non-admin users may only change their own password, not name/phone/class
+    if user["role"] == "admin":
+        for f in ["name","phone"]:
+            if f in body:
+                updates.append(f"{f} = ?")
+                values.append(body[f])
     if body.get("password"):
         updates.append("password_hash = ?")
         values.append(hash_password(body["password"]))
     if updates:
         values.append(teacher_id)
         conn.execute(f"UPDATE users SET {','.join(updates)} WHERE id=?", values)
-    if "class_id" in body:
+    if "class_id" in body and user["role"] == "admin":
         conn.execute("UPDATE classes SET teacher_id=NULL WHERE teacher_id=?", (teacher_id,))
         if body["class_id"]:
             conn.execute("UPDATE classes SET teacher_id=? WHERE id=?", (teacher_id, body["class_id"]))
@@ -1350,7 +1353,9 @@ def handle_parent_acknowledge(handler, user, body):
         return send_error(handler, "Forbidden", 403)
     pupil_id = body.get("pupil_id")
     term_id = body.get("term_id")
-    comment = body.get("comment", "")
+    comment = (body.get("comment") or "").strip()
+    if len(comment) > 1000:
+        return send_error(handler, "Comment must be 1000 characters or less", 400)
     if not pupil_id or not term_id:
         return send_error(handler, "pupil_id and term_id required")
     conn = get_db()
