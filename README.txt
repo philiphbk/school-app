@@ -61,6 +61,8 @@ MANUAL START (any system):
     python server.py      (Windows)
   Then open your browser and go to: http://localhost:8080
 
+The server automatically loads environment variables from a local `.env` file if present.
+
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  FIRST ADMIN LOGIN / SECURE BOOTSTRAP
@@ -246,6 +248,12 @@ To enable the new integrations, configure these environment variables:
     APP_URL
 
 For server-side PDF generation, install WeasyPrint and any OS packages it requires.
+
+Note for local development:
+  - `ALLOWED_ORIGIN=*` is accepted without a readiness warning outside production
+  - `APP_URL` falls back to your local server URL if omitted
+  - SMTP, Paystack, messaging and PDF generation are treated as optional in development
+  - In production, these checks remain strict and will still warn/error until fully configured
 
 Production checklist:
   1. Mount persistent storage and set DATA_DIR

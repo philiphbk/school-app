@@ -35,6 +35,40 @@ except Exception:
     WeasyHTML = None
 
 
+def load_dotenv(env_path=None, override=False):
+    """Load simple KEY=VALUE pairs from a .env file without external deps."""
+    env_path = env_path or os.path.join(os.path.dirname(__file__), ".env")
+    if not os.path.exists(env_path):
+        return False
+
+    def _strip_inline_comment(value):
+        if not value or value[0] in ('"', "'"):
+            return value
+        if " #" in value:
+            return value.split(" #", 1)[0].rstrip()
+        return value
+
+    with open(env_path, "r", encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = _strip_inline_comment(value.strip())
+            if value[:1] == value[-1:] and value[:1] in ('"', "'"):
+                value = value[1:-1]
+            if not override and key in os.environ:
+                continue
+            os.environ[key] = value
+    return True
+
+
+load_dotenv()
+
+
 def env_flag(name, default=False):
     value = os.environ.get(name)
     if value is None:
@@ -42,44 +76,55 @@ def env_flag(name, default=False):
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+def env_text(name, default=""):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value if value else default
+
+
 def is_production_env(value):
     return (value or "").strip().lower() in ("production", "prod")
 
 # Railway (and most cloud platforms) inject a PORT environment variable.
 # Fall back to 8080 for local development.
-PORT = int(os.environ.get("PORT", 8080))
-ENVIRONMENT = os.environ.get("ENVIRONMENT", os.environ.get("ENV", "development")).strip().lower() or "development"
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO"
+PORT = int(env_text("PORT", "8080"))
+ENVIRONMENT = env_text("ENVIRONMENT", env_text("ENV", "development")).lower() or "development"
+LOG_LEVEL = env_text("LOG_LEVEL", "INFO").upper() or "INFO"
 
 # CORS
-ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "*")
+ALLOWED_ORIGIN = env_text("ALLOWED_ORIGIN", "*")
 
 # Email (SMTP) config
-SMTP_HOST = os.environ.get("SMTP_HOST", "")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER", "")
-SMTP_PASS = os.environ.get("SMTP_PASS", "")
-SMTP_FROM = os.environ.get("SMTP_FROM", "")
-APP_URL = os.environ.get("APP_URL", "").rstrip("/")
+SMTP_HOST = env_text("SMTP_HOST", "")
+SMTP_PORT = int(env_text("SMTP_PORT", "587"))
+SMTP_USER = env_text("SMTP_USER", "")
+SMTP_PASS = env_text("SMTP_PASS", "")
+SMTP_FROM = env_text("SMTP_FROM", "")
+APP_URL_RAW = env_text("APP_URL", "")
+APP_URL = APP_URL_RAW.rstrip("/")
+if not APP_URL and not is_production_env(ENVIRONMENT):
+    APP_URL = f"http://localhost:{PORT}"
 
 # Payment / messaging integrations
-PAYSTACK_SECRET_KEY = os.environ.get("PAYSTACK_SECRET_KEY", "")
-PAYSTACK_PUBLIC_KEY = os.environ.get("PAYSTACK_PUBLIC_KEY", "")
-PAYSTACK_CALLBACK_URL = os.environ.get("PAYSTACK_CALLBACK_URL", "")
+PAYSTACK_SECRET_KEY = env_text("PAYSTACK_SECRET_KEY", "")
+PAYSTACK_PUBLIC_KEY = env_text("PAYSTACK_PUBLIC_KEY", "")
+PAYSTACK_CALLBACK_URL = env_text("PAYSTACK_CALLBACK_URL", "")
 
-INITIAL_ADMIN_NAME = os.environ.get("INITIAL_ADMIN_NAME", "School Admin").strip() or "School Admin"
-INITIAL_ADMIN_EMAIL = os.environ.get("INITIAL_ADMIN_EMAIL", "").strip().lower()
-INITIAL_ADMIN_PASSWORD = os.environ.get("INITIAL_ADMIN_PASSWORD", "")
+INITIAL_ADMIN_NAME = env_text("INITIAL_ADMIN_NAME", "School Admin")
+INITIAL_ADMIN_EMAIL = env_text("INITIAL_ADMIN_EMAIL", "").lower()
+INITIAL_ADMIN_PASSWORD = env_text("INITIAL_ADMIN_PASSWORD", "")
 ALLOW_DEFAULT_ADMIN = env_flag("ALLOW_DEFAULT_ADMIN", default=False)
 ALLOW_DESTRUCTIVE_MIGRATIONS = env_flag("ALLOW_DESTRUCTIVE_MIGRATIONS", default=not is_production_env(ENVIRONMENT))
 
-WHATSAPP_PROVIDER = os.environ.get("WHATSAPP_PROVIDER", "termii").strip().lower()
-TERMII_API_KEY = os.environ.get("TERMII_API_KEY", "")
-TERMII_SENDER = os.environ.get("TERMII_SENDER", "GISL Schools")
-TERMII_SMS_ENDPOINT = os.environ.get("TERMII_SMS_ENDPOINT", "https://api.ng.termii.com/api/sms/send")
-TERMII_WHATSAPP_ENDPOINT = os.environ.get("TERMII_WHATSAPP_ENDPOINT", "")
-META_WHATSAPP_ACCESS_TOKEN = os.environ.get("META_WHATSAPP_ACCESS_TOKEN", "")
-META_WHATSAPP_PHONE_NUMBER_ID = os.environ.get("META_WHATSAPP_PHONE_NUMBER_ID", "")
+WHATSAPP_PROVIDER = env_text("WHATSAPP_PROVIDER", "termii").lower()
+TERMII_API_KEY = env_text("TERMII_API_KEY", "")
+TERMII_SENDER = env_text("TERMII_SENDER", "GISL Schools")
+TERMII_SMS_ENDPOINT = env_text("TERMII_SMS_ENDPOINT", "https://api.ng.termii.com/api/sms/send")
+TERMII_WHATSAPP_ENDPOINT = env_text("TERMII_WHATSAPP_ENDPOINT", "")
+META_WHATSAPP_ACCESS_TOKEN = env_text("META_WHATSAPP_ACCESS_TOKEN", "")
+META_WHATSAPP_PHONE_NUMBER_ID = env_text("META_WHATSAPP_PHONE_NUMBER_ID", "")
 
 # Login rate limiting
 _login_attempts = {}
@@ -88,7 +133,7 @@ _login_lock = threading.Lock()
 # On Railway, mount a persistent volume at /data and set DATA_DIR=/data
 # so the database and uploads survive redeploys. Falls back to the app
 # folder for local use.
-_DATA_DIR = os.environ.get("DATA_DIR", os.path.dirname(__file__))
+_DATA_DIR = env_text("DATA_DIR", os.path.dirname(__file__))
 DB_PATH    = os.path.join(_DATA_DIR, "school.db")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 UPLOADS_DIR = os.path.join(_DATA_DIR, "uploads")
@@ -213,8 +258,8 @@ def get_system_checks():
     checks.append(_build_check(
         "cors_origin",
         "CORS origin policy",
-        "ok" if origin_locked else ("error" if prod else "warning"),
-        f"ALLOWED_ORIGIN={ALLOWED_ORIGIN or '(empty)'}",
+        "ok" if origin_locked or not prod else "error",
+        f"ALLOWED_ORIGIN={ALLOWED_ORIGIN or '(empty)'}" if origin_locked or prod else "ALLOWED_ORIGIN=* allowed for local development",
         fatal=prod and not origin_locked,
     ))
 
@@ -223,7 +268,7 @@ def get_system_checks():
         "app_url",
         "Public application URL",
         "ok" if app_url_ok else ("error" if prod else "warning"),
-        APP_URL or "APP_URL is not configured",
+        APP_URL if APP_URL_RAW else (APP_URL or "APP_URL is not configured"),
         fatal=prod and not app_url_ok,
     ))
 
@@ -242,8 +287,8 @@ def get_system_checks():
     checks.append(_build_check(
         "smtp",
         "SMTP notifications",
-        "ok" if smtp_ready else ("warning" if smtp_partially_set or prod else "warning"),
-        "SMTP is configured" if smtp_ready else "SMTP is disabled or incomplete",
+        "ok" if smtp_ready else ("warning" if smtp_partially_set or prod else "ok"),
+        "SMTP is configured" if smtp_ready else ("SMTP is disabled or incomplete" if smtp_partially_set or prod else "SMTP is disabled for local development"),
     ))
 
     paystack_ready = all([PAYSTACK_PUBLIC_KEY, PAYSTACK_SECRET_KEY, PAYSTACK_CALLBACK_URL])
@@ -251,23 +296,23 @@ def get_system_checks():
     checks.append(_build_check(
         "paystack",
         "Paystack payments",
-        "ok" if paystack_ready else ("warning" if paystack_partial or prod else "warning"),
-        "Paystack is configured" if paystack_ready else "Paystack is disabled or incomplete",
+        "ok" if paystack_ready else ("warning" if paystack_partial or prod else "ok"),
+        "Paystack is configured" if paystack_ready else ("Paystack is disabled or incomplete" if paystack_partial or prod else "Paystack is disabled for local development"),
     ))
 
     whatsapp_ready = bool(TERMII_API_KEY or (META_WHATSAPP_ACCESS_TOKEN and META_WHATSAPP_PHONE_NUMBER_ID))
     checks.append(_build_check(
         "messaging",
         "SMS / WhatsApp messaging",
-        "ok" if whatsapp_ready else "warning",
-        "Messaging provider is configured" if whatsapp_ready else "No messaging provider is fully configured",
+        "ok" if whatsapp_ready or not prod else "warning",
+        "Messaging provider is configured" if whatsapp_ready else ("No messaging provider is fully configured" if prod else "Messaging is disabled for local development"),
     ))
 
     checks.append(_build_check(
         "pdf_generation",
         "PDF generation",
-        "ok" if WeasyHTML else "warning",
-        "WeasyPrint is available" if WeasyHTML else "WeasyPrint is missing or missing system dependencies",
+        "ok" if WeasyHTML or not prod else "warning",
+        "WeasyPrint is available" if WeasyHTML else ("WeasyPrint is missing or missing system dependencies" if prod else "PDF generation is disabled in local development until WeasyPrint is installed"),
     ))
 
     admin_count = 0
@@ -374,6 +419,8 @@ def init_db():
     try:
         for tbl in _old_schema_tables:
             cols = {row[1]: row[2] for row in c.execute(f"PRAGMA table_info({tbl})").fetchall()}
+            if not cols:
+                continue
             # Old schema: INTEGER primary key OR missing expected TEXT columns
             if cols.get("id") == "INTEGER" or (tbl == "parent_accounts" and "email" not in cols):
                 if not ALLOW_DESTRUCTIVE_MIGRATIONS:
@@ -2430,7 +2477,7 @@ def handle_save_parent_account(handler, user, body, parent_id=None):
             write_audit(user, "create_parent_account", target_type="parent_account", target_id=pid,
                         details=email, ip=get_client_ip(handler))
             # Send welcome email with credentials
-            app_url = os.environ.get("APP_URL", "")
+            app_url = APP_URL
             html = f"""<html><body>
 <p>Dear {name},</p>
 <p>Your parent portal account has been created for <strong>GISL Daycare Nursery &amp; Primary School</strong>.</p>

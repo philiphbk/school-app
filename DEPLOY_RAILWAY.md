@@ -40,6 +40,8 @@ Share this with staff and parents.
 
 ## Environment Variables
 
+The application auto-loads a local `.env` file during development, but on Railway you should configure the production values below in the **Variables** tab.
+
 | Variable | Value | Purpose |
 |----------|-------|---------|
 | `PORT` | (set automatically by Railway) | HTTP port |
@@ -52,6 +54,21 @@ Share this with staff and parents.
 | `INITIAL_ADMIN_PASSWORD` | strong password | Secure first admin password |
 | `ALLOW_DEFAULT_ADMIN` | `false` | Prevents insecure demo admin in production |
 | `ALLOW_DESTRUCTIVE_MIGRATIONS` | `false` | Prevents destructive schema repair unless explicitly allowed |
+
+---
+
+### Optional integrations
+
+These are optional in local development, but production readiness will continue to report warnings until they are fully configured:
+
+| Variable | Purpose |
+|----------|---------|
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | Email notifications |
+| `PAYSTACK_PUBLIC_KEY`, `PAYSTACK_SECRET_KEY`, `PAYSTACK_CALLBACK_URL` | Online fee payments |
+| `TERMII_API_KEY`, `TERMII_SENDER`, `TERMII_SMS_ENDPOINT`, `TERMII_WHATSAPP_ENDPOINT` | SMS / WhatsApp via Termii |
+| `META_WHATSAPP_ACCESS_TOKEN`, `META_WHATSAPP_PHONE_NUMBER_ID` | Meta WhatsApp Cloud API alternative |
+
+For server-side PDFs, install WeasyPrint and its required system libraries in your deployment image.
 
 ---
 

@@ -645,6 +645,48 @@ body.dark-mode {
   background:#0b1220;
 }
 
+body.dark-mode .sidebar,
+body.dark-mode .mobile-menu-btn {
+  background: #020617;
+  color: var(--sidebar-text);
+}
+
+body.dark-mode .sidebar-header,
+body.dark-mode .sidebar-footer {
+  background: #0f172a;
+  border-color: #243041;
+}
+
+body.dark-mode .nav-item {
+  color: #cbd5e1;
+}
+
+body.dark-mode .nav-item:hover {
+  background: rgba(148, 163, 184, .12);
+  color: #ffffff;
+}
+
+body.dark-mode .nav-item.active {
+  background: rgba(123, 29, 29, .4);
+  color: #ffffff;
+}
+
+body.dark-mode .user-email,
+body.dark-mode .sidebar-subtitle,
+body.dark-mode .btn-logout {
+  color: #94a3b8;
+}
+
+body.dark-mode .btn-logout {
+  background: rgba(148, 163, 184, .08);
+  border-color: #243041;
+}
+
+body.dark-mode .btn-logout:hover {
+  background: rgba(148, 163, 184, .16);
+  color: #ffffff;
+}
+
 body.dark-mode .login-card,
 body.dark-mode .settings-card,
 body.dark-mode .table-container,

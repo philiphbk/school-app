@@ -37,6 +37,19 @@ def load_server_module(temp_dir, extra_env=None):
         "ENVIRONMENT": "test",
         "ALLOW_DEFAULT_ADMIN": "false",
         "ALLOWED_ORIGIN": "http://localhost:8080",
+        "APP_URL": "",
+        "SMTP_HOST": "",
+        "SMTP_PORT": "587",
+        "SMTP_USER": "",
+        "SMTP_PASS": "",
+        "SMTP_FROM": "",
+        "PAYSTACK_PUBLIC_KEY": "",
+        "PAYSTACK_SECRET_KEY": "",
+        "PAYSTACK_CALLBACK_URL": "",
+        "TERMII_API_KEY": "",
+        "TERMII_WHATSAPP_ENDPOINT": "",
+        "META_WHATSAPP_ACCESS_TOKEN": "",
+        "META_WHATSAPP_PHONE_NUMBER_ID": "",
     })
     os.environ.update(extra_env)
     module_name = f"server_test_{next(tempfile._get_candidate_names())}"
@@ -57,7 +70,27 @@ def decode_json(handler):
     return json.loads(payload or "{}")
 
 
+def get_check(report, key):
+    return next(item for item in report["checks"] if item["key"] == key)
+
+
 class ProductionReadinessTests(unittest.TestCase):
+    def test_blank_data_dir_falls_back_to_app_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, old_env = load_server_module(temp_dir, {
+                "DATA_DIR": "   ",
+                "INITIAL_ADMIN_EMAIL": "admin@example.com",
+                "INITIAL_ADMIN_PASSWORD": "StrongPass123",
+            })
+            try:
+                expected_dir = str(SERVER_PATH.parent)
+                self.assertEqual(module._DATA_DIR, expected_dir)
+
+                module.LOG_PATH = os.path.join(temp_dir, "app.log")
+                module.configure_logging()
+            finally:
+                restore_env(old_env)
+
     def test_configured_admin_bootstrap_and_login(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module, old_env = load_server_module(temp_dir, {
@@ -98,6 +131,75 @@ class ProductionReadinessTests(unittest.TestCase):
                 report = module.get_system_checks()
                 self.assertGreaterEqual(report["summary"]["error"], 1)
                 self.assertEqual(module._BOOTSTRAP_STATUS["mode"], "missing_admin")
+            finally:
+                restore_env(old_env)
+
+    def test_local_readiness_allows_optional_integrations_to_be_disabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, old_env = load_server_module(temp_dir, {
+                "ENVIRONMENT": "development",
+                "ALLOWED_ORIGIN": "*",
+                "APP_URL": "",
+                "SMTP_HOST": "",
+                "SMTP_USER": "",
+                "SMTP_PASS": "",
+                "SMTP_FROM": "",
+                "PAYSTACK_PUBLIC_KEY": "",
+                "PAYSTACK_SECRET_KEY": "",
+                "PAYSTACK_CALLBACK_URL": "",
+                "TERMII_API_KEY": "",
+                "META_WHATSAPP_ACCESS_TOKEN": "",
+                "META_WHATSAPP_PHONE_NUMBER_ID": "",
+                "INITIAL_ADMIN_EMAIL": "admin@example.com",
+                "INITIAL_ADMIN_PASSWORD": "StrongPass123",
+            })
+            try:
+                module.configure_logging()
+                module.ensure_runtime_directories()
+                module.init_db()
+                report = module.get_system_checks()
+
+                self.assertEqual(get_check(report, "cors_origin")["status"], "ok")
+                self.assertEqual(get_check(report, "app_url")["status"], "ok")
+                self.assertTrue(get_check(report, "app_url")["message"].startswith("http://localhost:"))
+                self.assertEqual(get_check(report, "smtp")["status"], "ok")
+                self.assertEqual(get_check(report, "paystack")["status"], "ok")
+                self.assertEqual(get_check(report, "messaging")["status"], "ok")
+                self.assertEqual(get_check(report, "admin_account")["status"], "ok")
+            finally:
+                restore_env(old_env)
+
+    def test_production_readiness_still_requires_locked_origin_and_app_url(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, old_env = load_server_module(temp_dir, {
+                "ENVIRONMENT": "production",
+                "ALLOWED_ORIGIN": "*",
+                "APP_URL": "",
+                "SMTP_HOST": "",
+                "SMTP_USER": "",
+                "SMTP_PASS": "",
+                "SMTP_FROM": "",
+                "PAYSTACK_PUBLIC_KEY": "",
+                "PAYSTACK_SECRET_KEY": "",
+                "PAYSTACK_CALLBACK_URL": "",
+                "TERMII_API_KEY": "",
+                "META_WHATSAPP_ACCESS_TOKEN": "",
+                "META_WHATSAPP_PHONE_NUMBER_ID": "",
+                "INITIAL_ADMIN_EMAIL": "admin@example.com",
+                "INITIAL_ADMIN_PASSWORD": "StrongPass123",
+            })
+            try:
+                module.configure_logging()
+                module.ensure_runtime_directories()
+                module.init_db()
+                report = module.get_system_checks()
+
+                self.assertEqual(get_check(report, "cors_origin")["status"], "error")
+                self.assertTrue(get_check(report, "cors_origin")["fatal"])
+                self.assertEqual(get_check(report, "app_url")["status"], "error")
+                self.assertTrue(get_check(report, "app_url")["fatal"])
+                with self.assertRaises(RuntimeError):
+                    module.enforce_production_readiness()
             finally:
                 restore_env(old_env)
 
