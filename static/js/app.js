@@ -1854,26 +1854,54 @@ function reportRatingBadge(val) {
 function renderReportCard(data) {
   const {
     pupil, term, results, grand_total, max_total, percentage, avg_per_subject,
-    position, total_in_class, least_class_avg, max_class_avg, num_subjects, age, conduct
+    position, total_in_class, least_class_avg, max_class_avg, num_subjects, age, conduct,
+    prev_term_results, is_cumulative
   } = data;
   const pupilName = `${pupil.last_name}, ${pupil.first_name}${pupil.other_name ? ' ' + pupil.other_name : ''}`;
   const c = conduct || {};
+  const prev = prev_term_results || {};
+  const ordinals = {1:'1ST', 2:'2ND', 3:'3RD'};
+  const curOrd = term ? (ordinals[term.term_number] || `${term.term_number}TH`) : '';
 
-  // Academic results rows
+  // Build results rows based on whether this is a cumulative (Term 3) view
   const resultRows = results.map(r => {
-    const total = (r.ca_score || 0) + (r.exam_score || 0);
-    const grade = reportGrade(total);
+    const curTotal = (r.ca_score || 0) + (r.exam_score || 0);
     const pos = r.position_in_subject || '—';
     const classAvg = r.class_subject_average != null ? Number(r.class_subject_average).toFixed(1) : '—';
-    return `<tr>
-      <td style="padding:2px 5px;border:1px solid #e5e7eb;font-size:9px">${r.subject_name}</td>
-      <td style="padding:2px 5px;text-align:center;border:1px solid #e5e7eb;font-size:9px">${r.exam_score != null ? r.exam_score : '—'}</td>
-      <td style="padding:2px 5px;text-align:center;border:1px solid #e5e7eb;font-size:9px">${r.ca_score != null ? r.ca_score : '—'}</td>
-      <td style="padding:2px 5px;text-align:center;font-weight:700;border:1px solid #e5e7eb;font-size:9px">${total || '—'}</td>
-      <td style="padding:2px 5px;text-align:center;border:1px solid #e5e7eb;font-size:9px">${grade}</td>
-      <td style="padding:2px 5px;text-align:center;border:1px solid #e5e7eb;font-size:9px">${pos}</td>
-      <td style="padding:2px 5px;text-align:center;border:1px solid #e5e7eb;font-size:9px">${classAvg}</td>
-    </tr>`;
+    const TD = 'padding:2px 5px;text-align:center;border:1px solid #e5e7eb;font-size:9px';
+    const TDS = 'padding:2px 5px;border:1px solid #e5e7eb;font-size:9px';
+
+    if (is_cumulative) {
+      const sid = r.subject_id;
+      const t1 = prev['1'] && prev['1'][sid] != null ? prev['1'][sid] : null;
+      const t2 = prev['2'] && prev['2'][sid] != null ? prev['2'][sid] : null;
+      const vals = [t1, t2, curTotal].filter(v => v != null);
+      const avgTotal = vals.length ? (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2) : null;
+      const grade = reportGrade(avgTotal != null ? Number(avgTotal) : curTotal);
+      return `<tr>
+        <td style="${TDS}">${r.subject_name}</td>
+        <td style="${TD}">${r.ca_score != null ? r.ca_score : '—'}</td>
+        <td style="${TD}">${r.exam_score != null ? r.exam_score : '—'}</td>
+        <td style="${TD};font-weight:700">${curTotal || '—'}</td>
+        <td style="${TD}">${t2 != null ? t2 : '—'}</td>
+        <td style="${TD}">${t1 != null ? t1 : '—'}</td>
+        <td style="${TD};font-weight:700;color:#7B1D1D">${avgTotal != null ? avgTotal : '—'}</td>
+        <td style="${TD}">${pos}</td>
+        <td style="${TD};font-weight:700;color:#7B1D1D">${grade}</td>
+        <td style="${TD}">${classAvg}</td>
+      </tr>`;
+    } else {
+      const grade = reportGrade(curTotal);
+      return `<tr>
+        <td style="${TDS}">${r.subject_name}</td>
+        <td style="${TD}">${r.ca_score != null ? r.ca_score : '—'}</td>
+        <td style="${TD}">${r.exam_score != null ? r.exam_score : '—'}</td>
+        <td style="${TD};font-weight:700">${curTotal || '—'}</td>
+        <td style="${TD}">${pos}</td>
+        <td style="${TD};font-weight:700;color:#7B1D1D">${grade}</td>
+        <td style="${TD}">${classAvg}</td>
+      </tr>`;
+    }
   }).join('');
 
   const conductItems = [
@@ -1952,12 +1980,17 @@ function renderReportCard(data) {
         <thead>
           <tr style="background:#f9f5f5">
             <th style="padding:3px 6px;text-align:left;border:1px solid #d1d5db;font-size:9px">Subject</th>
-            <th style="padding:3px 6px;text-align:center;border:1px solid #d1d5db;font-size:9px">Exam(60)</th>
             <th style="padding:3px 6px;text-align:center;border:1px solid #d1d5db;font-size:9px">Test(40)</th>
-            <th style="padding:3px 6px;text-align:center;border:1px solid #d1d5db;font-size:9px">Total</th>
-            <th style="padding:3px 6px;text-align:center;border:1px solid #d1d5db;font-size:9px">Grade</th>
+            <th style="padding:3px 6px;text-align:center;border:1px solid #d1d5db;font-size:9px">Exam(60)</th>
+            <th style="padding:3px 6px;text-align:center;border:1px solid #d1d5db;font-size:9px">${curOrd} Total(%)</th>
+            ${is_cumulative ? `
+            <th style="padding:3px 6px;text-align:center;border:1px solid #d1d5db;font-size:9px">2ND Total(%)</th>
+            <th style="padding:3px 6px;text-align:center;border:1px solid #d1d5db;font-size:9px">1ST Total(%)</th>
+            <th style="padding:3px 6px;text-align:center;border:1px solid #d1d5db;font-size:9px">Total Avg(%)</th>
+            ` : ''}
             <th style="padding:3px 6px;text-align:center;border:1px solid #d1d5db;font-size:9px">Pos.</th>
-            <th style="padding:3px 6px;text-align:center;border:1px solid #d1d5db;font-size:9px">Cls Avg</th>
+            <th style="padding:3px 6px;text-align:center;border:1px solid #d1d5db;font-size:9px">Grade</th>
+            <th style="padding:3px 6px;text-align:center;border:1px solid #d1d5db;font-size:9px">Cls Avg(%)</th>
           </tr>
         </thead>
         <tbody>${resultRows}</tbody>

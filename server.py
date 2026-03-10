@@ -2070,6 +2070,22 @@ def handle_get_report(handler, user, pupil_id, term_id):
     ).fetchall()
     progress_history = [dict(r) for r in reversed(progress_history_rows)]
 
+    # For Term 3, pull Term 1 and Term 2 per-subject totals for the cumulative view
+    prev_term_results = {}
+    if term and term["term_number"] == 3:
+        prev_terms = conn.execute(
+            "SELECT * FROM terms WHERE academic_year=? AND term_number IN (1,2) ORDER BY term_number",
+            (term["academic_year"],)
+        ).fetchall()
+        for pt in prev_terms:
+            pt_rows = conn.execute(
+                "SELECT (r.ca_score + r.exam_score) as total, s.id as subject_id "
+                "FROM results r JOIN subjects s ON s.id=r.subject_id "
+                "WHERE r.pupil_id=? AND r.term_id=?",
+                (pupil_id, pt["id"])
+            ).fetchall()
+            prev_term_results[str(pt["term_number"])] = {r["subject_id"]: r["total"] for r in pt_rows}
+
     conn.close()
     send_json(handler, {
         "pupil": dict(pupil),
@@ -2090,7 +2106,9 @@ def handle_get_report(handler, user, pupil_id, term_id):
         "parent_acknowledgment": dict(parent_ack) if parent_ack else None,
         "class_type": pupil["class_type"] if "class_type" in pupil.keys() else "primary",
         "attendance_summary": attendance_summary,
-        "progress_history": progress_history
+        "progress_history": progress_history,
+        "prev_term_results": prev_term_results,
+        "is_cumulative": bool(prev_term_results),
     })
 
 # ── CONDUCT RATINGS ───────────────────────────────────────────────────────────
@@ -3611,35 +3629,227 @@ def handle_publish_results(handler, user, body):
     write_audit(user, "publish_results", details=f"{count} parent notification(s)", ip=get_client_ip(handler))
     send_json(handler, {"message": f"Results published to {count} parent(s)"})
 
+def _pdf_grade(total):
+    if total is None: return '—'
+    if total >= 85: return 'A+'
+    if total >= 75: return 'B+'
+    if total >= 60: return 'B'
+    if total >= 50: return 'C'
+    if total >= 40: return 'D'
+    return 'E'
+
+def _pdf_rating_text(val):
+    mapping = {'E': 'Excellent', 'VG': 'Very Good', 'G': 'Good', 'F': 'Fair', 'P': 'Poor'}
+    return mapping.get((val or '').upper(), val or '—')
+
 def build_report_pdf_html(pupil, term, report_data):
-    progress_rows = "".join(
-        f"<tr><td style='padding:6px;border:1px solid #ddd'>{row['label']}</td><td style='padding:6px;border:1px solid #ddd;text-align:right'>{row['total_score']}</td><td style='padding:6px;border:1px solid #ddd;text-align:right'>{row['average_score']}</td></tr>"
-        for row in report_data.get("progress_history", [])
-    ) or "<tr><td colspan='3' style='padding:6px;border:1px solid #ddd'>No historical data</td></tr>"
-    result_rows = "".join(
-        f"<tr><td style='padding:6px;border:1px solid #ddd'>{r['subject_name']}</td><td style='padding:6px;border:1px solid #ddd;text-align:right'>{r['ca_score']}</td><td style='padding:6px;border:1px solid #ddd;text-align:right'>{r['exam_score']}</td><td style='padding:6px;border:1px solid #ddd;text-align:right'>{r['total']}</td></tr>"
-        for r in report_data.get("results", [])
-    )
+    TD = "padding:4px 6px;border:1px solid #ccc;font-size:9pt"
+    TH = "padding:4px 6px;border:1px solid #999;font-size:9pt;background:#f9f5f5;font-weight:bold"
+    SUBJ_TD = "padding:4px 6px;border:1px solid #ccc;font-size:9pt;white-space:nowrap"
+
+    is_cumulative = report_data.get("is_cumulative", False)
+    prev = report_data.get("prev_term_results", {})
+    results = report_data.get("results", [])
+    conduct = report_data.get("conduct", {})
     att = report_data.get("attendance_summary", {})
-    return f"""<html><body style='font-family:Arial,sans-serif;color:#222'>
-    <h1 style='color:#7B1D1D'>GISL Schools Report Card</h1>
-    <p><strong>Pupil:</strong> {pupil['first_name']} {pupil['last_name']}<br>
-    <strong>Class:</strong> {pupil.get('class_name','')}<br>
-    <strong>Term:</strong> {term['academic_year']} Term {term['term_number']}</p>
-    <h3>Academic Results</h3>
-    <table style='width:100%;border-collapse:collapse'>
-      <tr><th style='padding:6px;border:1px solid #ddd'>Subject</th><th style='padding:6px;border:1px solid #ddd'>CA</th><th style='padding:6px;border:1px solid #ddd'>Exam</th><th style='padding:6px;border:1px solid #ddd'>Total</th></tr>
-      {result_rows}
+    num_subjects = report_data.get("num_subjects", len(results))
+    grand_total = report_data.get("grand_total", 0)
+    avg_per_subject = report_data.get("avg_per_subject", 0)
+    position = report_data.get("position")
+    total_in_class = report_data.get("total_in_class")
+    least_avg = report_data.get("least_class_avg")
+    max_avg = report_data.get("max_class_avg")
+    max_total = report_data.get("max_total", num_subjects * 100)
+    age = report_data.get("age", "")
+
+    term_num = term.get("term_number", 1)
+    ordinals = {1: "1ST", 2: "2ND", 3: "3RD"}
+    cur_ord = ordinals.get(term_num, f"{term_num}TH")
+
+    pupil_name = f"{pupil.get('last_name','').upper()}, {pupil.get('first_name','')} {pupil.get('other_name','') or ''}".strip()
+
+    # Build results rows
+    result_rows_html = ""
+    for i, r in enumerate(results):
+        sid = r.get("subject_id", "")
+        ca = r.get("ca_score")
+        exam = r.get("exam_score")
+        cur_total = (ca or 0) + (exam or 0)
+        row_bg = "#fafafa" if i % 2 == 0 else "white"
+
+        if is_cumulative:
+            t1 = prev.get("1", {}).get(sid)
+            t2 = prev.get("2", {}).get(sid)
+            vals_for_avg = [v for v in [t1, t2, cur_total] if v is not None]
+            avg_total = round(sum(vals_for_avg) / len(vals_for_avg), 2) if vals_for_avg else None
+            grade = _pdf_grade(avg_total)
+            pos = r.get("position_in_subject", "—")
+            cls_avg = r.get("class_subject_average")
+            result_rows_html += f"""<tr style="background:{row_bg}">
+              <td style="{SUBJ_TD}">{r.get('subject_name','')}</td>
+              <td style="{TD};text-align:center">{ca if ca is not None else '—'}</td>
+              <td style="{TD};text-align:center">{exam if exam is not None else '—'}</td>
+              <td style="{TD};text-align:center;font-weight:bold">{cur_total or '—'}</td>
+              <td style="{TD};text-align:center">{t2 if t2 is not None else '—'}</td>
+              <td style="{TD};text-align:center">{t1 if t1 is not None else '—'}</td>
+              <td style="{TD};text-align:center;font-weight:bold">{avg_total if avg_total is not None else '—'}</td>
+              <td style="{TD};text-align:center">{pos}</td>
+              <td style="{TD};text-align:center;font-weight:bold;color:#7B1D1D">{grade}</td>
+              <td style="{TD};text-align:center">{f'{cls_avg:.1f}' if cls_avg is not None else '—'}</td>
+            </tr>"""
+        else:
+            grade = _pdf_grade(cur_total)
+            pos = r.get("position_in_subject", "—")
+            cls_avg = r.get("class_subject_average")
+            result_rows_html += f"""<tr style="background:{row_bg}">
+              <td style="{SUBJ_TD}">{r.get('subject_name','')}</td>
+              <td style="{TD};text-align:center">{ca if ca is not None else '—'}</td>
+              <td style="{TD};text-align:center">{exam if exam is not None else '—'}</td>
+              <td style="{TD};text-align:center;font-weight:bold">{cur_total or '—'}</td>
+              <td style="{TD};text-align:center">{pos}</td>
+              <td style="{TD};text-align:center;font-weight:bold;color:#7B1D1D">{grade}</td>
+              <td style="{TD};text-align:center">{f'{cls_avg:.1f}' if cls_avg is not None else '—'}</td>
+            </tr>"""
+
+    if is_cumulative:
+        table_header = f"""<tr style="background:#7B1D1D;color:white">
+          <th style="{TH};background:#7B1D1D;color:white;text-align:left">Subjects</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">Test (40)</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">Exam (60)</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">{cur_ord} Total(%)</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">2ND Total(%)</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">1ST Total(%)</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">Total Avg (%)</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">Position</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">Grade</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">Class (%) Avg</th>
+        </tr>"""
+    else:
+        table_header = f"""<tr style="background:#7B1D1D;color:white">
+          <th style="{TH};background:#7B1D1D;color:white;text-align:left">Subjects</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">Test (40)</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">Exam (60)</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">{cur_ord} Total(%)</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">Position</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">Grade</th>
+          <th style="{TH};background:#7B1D1D;color:white;text-align:center">Class (%) Avg</th>
+        </tr>"""
+
+    conduct_rows = "".join(
+        f"<tr><td style='{TD};width:52%'>{label}</td><td style='{TD}'>{_pdf_rating_text(conduct.get(key,''))}</td></tr>"
+        for label, key in [
+            ("Punctuality", "punctuality"), ("Honesty", "honesty"), ("Cleanliness", "cleanliness"),
+            ("Leadership", "leadership"), ("Politeness", "politeness"), ("Attentiveness", "attentiveness"),
+        ]
+    )
+    skill_rows = "".join(
+        f"<tr><td style='{TD};width:52%'>{label}</td><td style='{TD}'>{_pdf_rating_text(conduct.get(key,''))}</td></tr>"
+        for label, key in [
+            ("H/Writing", "writing"), ("Handwork", "handwork"), ("Verbal Fluency", "verbal_fluency"),
+            ("Drama", "drama"), ("Sports", "sports"),
+        ]
+    )
+
+    pos_str = f"{position}/{total_in_class}" if position and total_in_class else "—"
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  body {{ font-family: Arial, sans-serif; font-size: 9pt; color: #222; margin: 0; padding: 8px; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  .header-box {{ border: 2px solid #7B1D1D; border-radius: 4px; padding: 6px 10px; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }}
+  .school-name {{ font-size: 13pt; font-weight: 800; color: #7B1D1D; text-transform: uppercase; }}
+  .section-title {{ background: #7B1D1D; color: white; padding: 3px 8px; font-weight: bold; font-size: 9pt; }}
+  .stat-label {{ font-size: 8pt; color: #666; }}
+  .stat-val {{ font-weight: bold; color: #7B1D1D; }}
+  .grading {{ font-size: 8pt; }}
+</style>
+</head><body>
+
+<!-- HEADER -->
+<div class="header-box">
+  <div style="flex:1;text-align:center">
+    <div class="school-name">GISL Daycare Nursery &amp; Primary School</div>
+    <div style="font-size:8pt;color:#666">3 Oludemi Adeniba Street, Atarere Layout, Off Tern id ire Shopping Complex, Ibadan</div>
+    <div style="font-size:8pt;color:#666">Tel: 08033299074, 09151404619, 08033295403</div>
+    <div style="font-size:8pt;font-style:italic;color:#7B1D1D">The Light of Knowledge</div>
+  </div>
+  <div style="text-align:center;border:2px solid #7B1D1D;padding:4px 8px;border-radius:3px;flex-shrink:0">
+    <div style="font-weight:bold;color:#7B1D1D;font-size:10pt">PUPIL'S RESULT</div>
+    <div style="font-size:8pt">{term.get('academic_year','')} — Term {term_num}</div>
+  </div>
+</div>
+
+<!-- PUPIL INFO -->
+<table style="margin-bottom:6px;font-size:9pt">
+  <tr>
+    <td style="padding:2px 8px;width:30%"><span class="stat-label">Name:</span> <strong>{pupil_name}</strong></td>
+    <td style="padding:2px 8px;width:20%"><span class="stat-label">Student No:</span> <strong>{pupil.get('admission_number','—')}</strong></td>
+    <td style="padding:2px 8px;width:15%"><span class="stat-label">Sex:</span> {pupil.get('gender','—')}</td>
+    <td style="padding:2px 8px;width:15%"><span class="stat-label">Term:</span> {cur_ord}</td>
+    <td style="padding:2px 8px;width:20%"><span class="stat-label">Session:</span> {term.get('academic_year','')}</td>
+  </tr>
+  <tr>
+    <td style="padding:2px 8px"><span class="stat-label">Class:</span> {pupil.get('class_name','—')}</td>
+    <td style="padding:2px 8px" colspan="2"><span class="stat-label">Age:</span> {age or '—'}</td>
+    <td style="padding:2px 8px" colspan="2"><span class="stat-label">Attendance:</span> {att.get('present',0)} present / {att.get('absent',0)} absent</td>
+  </tr>
+</table>
+
+<!-- RESULTS TABLE + RIGHT PANEL -->
+<div style="display:flex;gap:8px;margin-bottom:6px">
+  <div style="flex:1;overflow:hidden">
+    <div class="section-title">Academic Performance</div>
+    <table>
+      {table_header}
+      {result_rows_html}
     </table>
-    <h3>Summary</h3>
-    <p><strong>Grand Total:</strong> {report_data.get('grand_total',0)} &nbsp; <strong>Average:</strong> {report_data.get('avg_per_subject',0)} &nbsp; <strong>Percentage:</strong> {report_data.get('percentage',0)}%</p>
-    <p><strong>Attendance:</strong> {att.get('percentage',0)}% ({att.get('present',0)} present, {att.get('late',0)} late, {att.get('absent',0)} absent)</p>
-    <h3>Progress Trend</h3>
-    <table style='width:100%;border-collapse:collapse'>
-      <tr><th style='padding:6px;border:1px solid #ddd'>Term</th><th style='padding:6px;border:1px solid #ddd'>Total</th><th style='padding:6px;border:1px solid #ddd'>Average</th></tr>
-      {progress_rows}
+  </div>
+  <div style="width:200px;flex-shrink:0">
+    <div class="section-title" style="margin-bottom:4px">Summary</div>
+    <table style="font-size:9pt;margin-bottom:6px">
+      <tr><td style="{TD};width:60%" class="stat-label">No of Subjects</td><td style="{TD};font-weight:bold">{num_subjects}</td></tr>
+      <tr><td style="{TD}" class="stat-label">Total Obtainable</td><td style="{TD};font-weight:bold">{max_total}</td></tr>
+      <tr><td style="{TD}" class="stat-label">Total Obtained</td><td style="{TD};font-weight:bold">{grand_total}</td></tr>
+      <tr><td style="{TD}" class="stat-label">No. in Class</td><td style="{TD};font-weight:bold">{total_in_class or '—'}</td></tr>
+      <tr><td style="{TD}" class="stat-label">Position</td><td style="{TD};font-weight:bold;color:#7B1D1D">{pos_str}</td></tr>
+      <tr><td style="{TD}" class="stat-label">Student Avg (%)</td><td style="{TD};font-weight:bold">{avg_per_subject}</td></tr>
+      <tr><td style="{TD}" class="stat-label">Least Class Avg</td><td style="{TD}">{f'{least_avg:.2f}' if least_avg is not None else '—'}</td></tr>
+      <tr><td style="{TD}" class="stat-label">Max Class Avg</td><td style="{TD}">{f'{max_avg:.2f}' if max_avg is not None else '—'}</td></tr>
     </table>
-    </body></html>"""
+    <div class="section-title" style="margin-bottom:2px">Observations on Conduct</div>
+    <table style="margin-bottom:6px">{conduct_rows}</table>
+    <div class="section-title" style="margin-bottom:2px">Performance in Physical Skills</div>
+    <table>{skill_rows}</table>
+  </div>
+</div>
+
+<!-- COMMENTS -->
+<div style="display:flex;gap:8px;margin-bottom:6px">
+  <div style="flex:1;border:1px solid #ccc;padding:4px 8px">
+    <div style="font-weight:bold;font-size:9pt;color:#7B1D1D;margin-bottom:2px">Teacher's Comment:</div>
+    <div style="min-height:18px;font-size:9pt">{conduct.get('teacher_comment','') or '—'}</div>
+    <div style="border-top:1px solid #333;margin-top:6px;font-size:8pt;color:#888">Signature &amp; Date</div>
+  </div>
+  <div style="flex:1;border:1px solid #ccc;padding:4px 8px">
+    <div style="font-weight:bold;font-size:9pt;color:#7B1D1D;margin-bottom:2px">Administrator's Comment:</div>
+    <div style="min-height:18px;font-size:9pt">{conduct.get('admin_comment','') or '—'}</div>
+    <div style="border-top:1px solid #333;margin-top:6px;font-size:8pt;color:#888">Signature &amp; Date</div>
+  </div>
+</div>
+
+<!-- GRADING + FOOTER -->
+<div style="border:1px solid #ccc;padding:4px 10px;background:#fafafa;display:flex;justify-content:space-between;align-items:center">
+  <div class="grading">
+    <strong>Grading:</strong>
+    A+ →85–100% &nbsp;:: B+ →75–84.9% &nbsp;:: B →60–74.9% &nbsp;:: C →50–59.9% &nbsp;:: D →40–49.9% &nbsp;:: E →0–39.9%
+  </div>
+  <div style="text-align:center;border:2px solid #7B1D1D;border-radius:50%;width:44px;height:44px;display:flex;align-items:center;justify-content:center;transform:rotate(-10deg);flex-shrink:0">
+    <span style="font-size:7pt;font-weight:800;color:#7B1D1D;text-align:center;line-height:1.2">GOVT.<br/>APPROVED</span>
+  </div>
+</div>
+
+</body></html>"""
 
 def handle_download_report_pdf(handler, user, pupil_id, term_id):
     conn = get_db()
@@ -3652,7 +3862,8 @@ def handle_download_report_pdf(handler, user, pupil_id, term_id):
         conn.close()
         return send_error(handler, "Forbidden", 403)
     my_results = conn.execute(
-        "SELECT s.name as subject_name, r.ca_score, r.exam_score, (r.ca_score+r.exam_score) as total FROM results r JOIN subjects s ON s.id=r.subject_id WHERE r.pupil_id=? AND r.term_id=? ORDER BY s.sort_order",
+        "SELECT s.name as subject_name, s.id as subject_id, r.ca_score, r.exam_score, (r.ca_score+r.exam_score) as total "
+        "FROM results r JOIN subjects s ON s.id=r.subject_id WHERE r.pupil_id=? AND r.term_id=? ORDER BY s.sort_order",
         (pupil_id, term_id)
     ).fetchall()
     progress = conn.execute(
@@ -3662,13 +3873,74 @@ def handle_download_report_pdf(handler, user, pupil_id, term_id):
     ).fetchall()
     progress = list(reversed(progress))
     attendance = calculate_attendance_summary(conn, pupil_id, term_id)
+
+    # Conduct for PDF
+    conduct_row = conn.execute("SELECT * FROM conduct_ratings WHERE pupil_id=? AND term_id=?", (pupil_id, term_id)).fetchone()
+
+    # Class stats
+    class_id = pupil["class_id"]
+    all_grand_totals = {}
+    if class_id and my_results:
+        all_class = conn.execute(
+            "SELECT r.pupil_id, SUM(r.ca_score+r.exam_score) as grand FROM results r "
+            "JOIN pupils p ON p.id=r.pupil_id WHERE r.term_id=? AND p.class_id=? AND p.status='active' GROUP BY r.pupil_id",
+            (term_id, class_id)
+        ).fetchall()
+        for row in all_class:
+            all_grand_totals[row["pupil_id"]] = row["grand"] or 0
+    my_grand = sum((r["total"] or 0) for r in my_results)
+    num_subjects = len(my_results)
+    class_position = sum(1 for v in all_grand_totals.values() if v > my_grand) + 1 if all_grand_totals else None
+    total_in_class = len(all_grand_totals)
+    least_class_avg = round(min(all_grand_totals.values()) / num_subjects, 2) if all_grand_totals and num_subjects else None
+    max_class_avg = round(max(all_grand_totals.values()) / num_subjects, 2) if all_grand_totals and num_subjects else None
+    avg_per_subject = round(my_grand / num_subjects, 2) if num_subjects else 0
+
+    # For Term 3 cumulative
+    prev_term_results = {}
+    if term["term_number"] == 3:
+        prev_terms = conn.execute(
+            "SELECT * FROM terms WHERE academic_year=? AND term_number IN (1,2) ORDER BY term_number",
+            (term["academic_year"],)
+        ).fetchall()
+        for pt in prev_terms:
+            pt_rows = conn.execute(
+                "SELECT (r.ca_score + r.exam_score) as total, s.id as subject_id "
+                "FROM results r JOIN subjects s ON s.id=r.subject_id WHERE r.pupil_id=? AND r.term_id=?",
+                (pupil_id, pt["id"])
+            ).fetchall()
+            prev_term_results[str(pt["term_number"])] = {r["subject_id"]: r["total"] for r in pt_rows}
+
+    dob = pupil["date_of_birth"]
+    age_str = ""
+    if dob:
+        try:
+            from datetime import date as _date
+            b = _date.fromisoformat(dob)
+            today = _date.today()
+            years = today.year - b.year - ((today.month, today.day) < (b.month, b.day))
+            months = (today.month - b.month) % 12
+            age_str = f"{years} Years {months} Months" if months else f"{years} Years"
+        except Exception:
+            pass
+
     report_data = {
         "results": [dict(r) for r in my_results],
-        "grand_total": round(sum((r["total"] or 0) for r in my_results), 2),
-        "avg_per_subject": round(sum((r["total"] or 0) for r in my_results) / len(my_results), 2) if my_results else 0,
-        "percentage": round(sum((r["total"] or 0) for r in my_results) / (len(my_results) * 100) * 100, 2) if my_results else 0,
+        "grand_total": round(my_grand, 2),
+        "avg_per_subject": avg_per_subject,
+        "percentage": round(my_grand / (num_subjects * 100) * 100, 2) if num_subjects else 0,
         "attendance_summary": attendance,
-        "progress_history": [{**dict(r), "label": f"{r['academic_year']} T{r['term_number']}"} for r in progress]
+        "progress_history": [{**dict(r), "label": f"{r['academic_year']} T{r['term_number']}"} for r in progress],
+        "conduct": dict(conduct_row) if conduct_row else {},
+        "position": class_position,
+        "total_in_class": total_in_class,
+        "num_subjects": num_subjects,
+        "max_total": num_subjects * 100,
+        "least_class_avg": least_class_avg,
+        "max_class_avg": max_class_avg,
+        "prev_term_results": prev_term_results,
+        "is_cumulative": bool(prev_term_results),
+        "age": age_str,
     }
     conn.close()
     pdf_bytes, err = render_pdf_bytes(build_report_pdf_html(dict(pupil), dict(term), report_data), base_url=STATIC_DIR)
