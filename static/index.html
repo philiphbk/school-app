@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>GISL Schools Management System</title>
   <meta name="description" content="GISL Schools Management System — manage pupils, teachers, results, fees and parent communications." />
+  <meta name="theme-color" content="#7B1D1D" />
+  <link rel="manifest" href="/manifest.json" />
   <link rel="stylesheet" href="/css/style.css" />
   <link rel="stylesheet" href="/css/animations.css" />
 </head>
@@ -80,6 +82,9 @@
       <a class="nav-item" href="#" data-page="results" onclick="navigate('results');return false;">
         <span class="nav-icon">📝</span> Results
       </a>
+      <a class="nav-item" href="#" data-page="attendance" onclick="navigate('attendance');return false;">
+        <span class="nav-icon">✅</span> Attendance
+      </a>
       <a class="nav-item admin-only" href="#" data-page="fees" onclick="navigate('fees');return false;">
         <span class="nav-icon">💰</span> Fees
       </a>
@@ -131,6 +136,12 @@
         <h3>Classes Overview</h3>
         <div id="class-breakdown-table"></div>
       </div>
+      <div class="analytics-section">
+        <div class="class-breakdown-card">
+          <h3>Performance & Analytics</h3>
+          <div id="dashboard-analytics"><div class="loading">Loading analytics…</div></div>
+        </div>
+      </div>
     </section>
 
     <!-- ── PUPILS ── -->
@@ -176,6 +187,7 @@
         <h2>Results Entry</h2>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <div style="font-size:13px;color:var(--gray-400)">Select a class and term — all subjects load at once</div>
+          <button class="btn btn-secondary" onclick="publishCurrentResults()">📣 Publish Results</button>
           <button class="btn btn-secondary admin-only" onclick="exportResultsCSV()">📥 Export CSV</button>
           <button class="btn btn-secondary" onclick="showBulkResultsImport()">📤 Import CSV</button>
         </div>
@@ -198,6 +210,29 @@
         </div>
       </div>
       <div id="results-grid-container"></div>
+    </section>
+
+    <!-- ── ATTENDANCE ── -->
+    <section id="page-attendance" class="page">
+      <div class="page-header">
+        <h2>Daily Attendance</h2>
+        <div class="term-badge" id="attendance-summary-badge">Today</div>
+      </div>
+      <div class="results-controls">
+        <div class="form-row" style="align-items:flex-end;gap:12px">
+          <div class="form-group" style="flex:1;min-width:180px">
+            <label>Class</label>
+            <select id="attendance-class-select"></select>
+          </div>
+          <div class="form-group" style="flex:1;min-width:180px">
+            <label>Date</label>
+            <input type="date" id="attendance-date" />
+          </div>
+          <button class="btn btn-primary" onclick="loadAttendancePage()" style="height:40px;margin-bottom:0">🔄 Load Register</button>
+          <button class="btn btn-success" onclick="saveAttendanceRegister()" style="height:40px;margin-bottom:0">💾 Save Attendance</button>
+        </div>
+      </div>
+      <div id="attendance-register" class="table-container"><div class="loading">Loading attendance…</div></div>
     </section>
 
     <!-- ── FEES ── -->
@@ -255,6 +290,58 @@
           <button class="btn btn-secondary mt-2" onclick="openNoticeModal()">+ Post Notice</button>
         </div>
         <div class="settings-card">
+          <h3>Calendar & Events</h3>
+          <div id="events-list"><div class="loading">Loading…</div></div>
+          <button class="btn btn-secondary mt-2" onclick="openEventModal()">+ Add Event</button>
+        </div>
+        <div class="settings-card">
+          <h3>Homework & Assignments</h3>
+          <div id="homework-admin-list"><div class="loading">Loading…</div></div>
+          <button class="btn btn-secondary mt-2" onclick="openHomeworkModal()">+ Add Homework</button>
+        </div>
+        <div class="settings-card">
+          <h3>Class Timetable</h3>
+          <div id="timetable-admin-list"><div class="loading">Loading…</div></div>
+          <button class="btn btn-secondary mt-2" onclick="openTimetableModal()">+ Add Timetable Entry</button>
+        </div>
+        <div class="settings-card admin-only">
+          <h3>Broadcast Messages</h3>
+          <div class="form-group"><label>Audience</label><select id="broadcast-target"><option value="all_parents">All Parents</option><option value="debtors_only">Debtors Only</option><option value="class">Specific Class</option></select></div>
+          <div class="form-group"><label>Class</label><select id="broadcast-class"></select></div>
+          <div class="form-group"><label>Channel</label><select id="broadcast-channel"><option value="sms_whatsapp">SMS + WhatsApp</option><option value="whatsapp">WhatsApp Only</option><option value="sms">SMS Only</option><option value="email">Email Only</option></select></div>
+          <div class="form-group"><label>Message</label><textarea id="broadcast-message" rows="4" placeholder="Type your message…"></textarea></div>
+          <button class="btn btn-primary" onclick="sendBroadcastMessage()">📤 Send Broadcast</button>
+        </div>
+        <div class="settings-card admin-only">
+          <h3>Payroll</h3>
+          <div id="payroll-list"><div class="loading">Loading…</div></div>
+          <button class="btn btn-secondary mt-2" onclick="openPayrollModal()">+ Add Payroll Entry</button>
+        </div>
+        <div class="settings-card admin-only">
+          <h3>Academic Year Rollover</h3>
+          <div class="form-group"><label>Next Academic Year</label><input type="text" id="rollover-year" placeholder="e.g. 2026/2027" /></div>
+          <button class="btn btn-primary" onclick="runAcademicRollover()">🎓 Run Rollover Wizard</button>
+        </div>
+        <div class="settings-card">
+          <h3>Appearance & App</h3>
+          <div class="form-group"><label><input type="checkbox" id="dark-mode-toggle" onchange="toggleDarkMode(this.checked)" style="width:auto;margin-right:8px" /> Enable Dark Mode</label></div>
+          <p style="font-size:13px;color:var(--gray-500)">Install this portal on phones as a Progressive Web App.</p>
+        </div>
+        <div class="settings-card admin-only" id="readiness-card">
+          <h3>Production Readiness</h3>
+          <p style="font-size:13px;color:var(--gray-500);margin-bottom:10px">Checks deployment safety, storage, admin bootstrap and integrations.</p>
+          <div id="readiness-list"><div class="loading">Loading…</div></div>
+        </div>
+        <div class="settings-card admin-only" id="backups-card">
+          <h3>Backups</h3>
+          <p style="font-size:13px;color:var(--gray-500);margin-bottom:10px">Create and review timestamped database backups.</p>
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+            <input type="text" id="backup-label" placeholder="Optional label e.g. pre-upgrade" />
+            <button class="btn btn-secondary" onclick="createSystemBackup()">💾 Create Backup</button>
+          </div>
+          <div id="backup-list"><div class="loading">Loading…</div></div>
+        </div>
+        <div class="settings-card">
           <h3>Change Admin Password</h3>
           <form id="change-password-form" onsubmit="changePassword(event)">
             <div class="form-group">
@@ -297,6 +384,8 @@
         <button class="tab-btn active" onclick="loadParentChildTab('results')">📊 Results</button>
         <button class="tab-btn" onclick="loadParentChildTab('fees')">💰 Fees</button>
         <button class="tab-btn" onclick="loadParentChildTab('report')">📄 Report Card</button>
+        <button class="tab-btn" onclick="loadParentChildTab('homework')">📚 Homework</button>
+        <button class="tab-btn" onclick="loadParentChildTab('timetable')">🗓️ Timetable</button>
         <button class="tab-btn" onclick="loadParentChildTab('acknowledge')">✅ Acknowledge</button>
       </div>
       <div id="parent-child-content" style="padding:4px 0"><div class="loading">Loading…</div></div>

@@ -1,2 +1,6 @@
-# No external dependencies — uses Python 3 standard library only.
-# This file exists so Railway's Nixpacks builder detects a Python project.
+# Core app remains mostly standard-library based.
+# Optional but recommended for server-side PDF generation:
+WeasyPrint>=62.0
+
+# Note: WeasyPrint may require additional system libraries in production
+# (for example cairo/pango-related packages depending on deployment target).

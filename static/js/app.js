@@ -6,6 +6,8 @@ const API = '';  // same-origin
 let currentUser = null;
 let appData = { classes: [], terms: [], subjects: [], pupils: [] };
 
+const DAYS_OF_WEEK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+
 // ─── SCHOOL CONSTANTS ────────────────────────────────────────────────────────
 const SCHOOL = {
   name: 'GISL SCHOOLS',
@@ -183,6 +185,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function startApp() {
   resetSessionTimers();
+  applyStoredTheme();
+  registerServiceWorker();
   // Hide force-password-change overlay if shown
   const forcePw = document.getElementById('force-pw-overlay');
   if (forcePw) forcePw.classList.add('hidden');
@@ -228,11 +232,48 @@ async function startApp() {
         if (badge) badge.textContent = `${current.academic_year} — Term ${current.term_number}`;
       }
     } catch {}
+    await processPaymentCallback();
     navigate('parent-home');
   } else {
     // Staff portal
     await loadReferenceData();
+    await processPaymentCallback();
     navigate('dashboard');
+  }
+}
+
+async function processPaymentCallback() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const reference = params.get('reference') || params.get('trxref');
+    if (!reference) return;
+
+    const alreadyHandled = sessionStorage.getItem(`verified_payment_${reference}`);
+    if (alreadyHandled) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+      return;
+    }
+
+    const res = await apiFetch('/api/fees/payments/verify', {
+      method: 'POST',
+      body: JSON.stringify({ reference })
+    });
+
+    sessionStorage.setItem(`verified_payment_${reference}`, '1');
+    window.history.replaceState({}, document.title, window.location.pathname);
+    showToast(res.message || 'Payment verified successfully', 'success', 5000);
+
+    if (currentUser?.role === 'parent' && _parentCurrentTab === 'fees' && _parentCurrentChild) {
+      const currentTerm = appData.terms.find(t => t.is_current) || appData.terms[0];
+      if (currentTerm) {
+        loadParentChildFees(currentTerm);
+      }
+    }
+  } catch (err) {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('reference') || params.get('trxref')) {
+      showToast(`Payment verification failed: ${err.message}`, 'error', 6000);
+    }
   }
 }
 
@@ -283,6 +324,7 @@ function navigate(page) {
     case 'teachers': loadTeachers(); break;
     case 'classes': loadClasses(); break;
     case 'results': loadResultsPage(); break;
+    case 'attendance': loadAttendancePage(); break;
     case 'fees': loadFees(); break;
     case 'archive': loadArchive('archived'); break;
     case 'settings': loadSettings(); break;
@@ -300,7 +342,10 @@ function toggleSidebar() {
 
 async function loadDashboard() {
   try {
-    const stats = await apiFetch('/api/stats');
+    const [stats, analytics] = await Promise.all([
+      apiFetch('/api/stats'),
+      apiFetch('/api/analytics').catch(() => ({ subject_averages: [], fee_collection: [], top_performers: [], bottom_performers: [] }))
+    ]);
     document.getElementById('stat-pupils').textContent = stats.total_pupils;
     document.getElementById('stat-teachers').textContent = stats.total_teachers;
     document.getElementById('stat-classes').textContent = stats.total_classes;
@@ -332,8 +377,164 @@ async function loadDashboard() {
           </tr>
         `).join('')}</tbody>
       </table>`;
+
+    const analyticsEl = document.getElementById('dashboard-analytics');
+    if (analyticsEl) {
+      const subjectRows = (analytics.subject_averages || []).slice(0, 8).map(r => {
+        const width = Math.max(6, Math.min(100, Number(r.average_score || 0)));
+        return `
+          <div class="mini-bar-row">
+            <div class="mini-bar-label">${esc(r.class_name)} · ${esc(r.subject_name)}</div>
+            <div class="mini-bar-track"><div class="mini-bar-fill" style="width:${width}%"></div></div>
+            <div class="mini-bar-value">${Number(r.average_score || 0).toFixed(1)}</div>
+          </div>`;
+      }).join('') || '<div class="empty-state">No analytics yet.</div>';
+      const feeRows = (analytics.fee_collection || []).map(r => {
+        const expected = Number(r.expected_total || 0);
+        const collected = Number(r.collected_total || 0);
+        const pct = expected ? Math.min(100, (collected / expected) * 100) : 0;
+        return `
+          <div class="mini-bar-row">
+            <div class="mini-bar-label">${esc(r.class_name)}</div>
+            <div class="mini-bar-track success"><div class="mini-bar-fill success" style="width:${pct}%"></div></div>
+            <div class="mini-bar-value">₦${collected.toLocaleString()}</div>
+          </div>`;
+      }).join('') || '<div class="empty-state">No fee data yet.</div>';
+      const top = (analytics.top_performers || []).map(p => `<li>${esc(p.first_name)} ${esc(p.last_name)} <strong>${Number(p.average_score || 0).toFixed(1)}</strong></li>`).join('') || '<li>No scores yet</li>';
+      const bottom = (analytics.bottom_performers || []).map(p => `<li>${esc(p.first_name)} ${esc(p.last_name)} <strong>${Number(p.average_score || 0).toFixed(1)}</strong></li>`).join('') || '<li>No scores yet</li>';
+      analyticsEl.innerHTML = `
+        <div class="analytics-grid">
+          <div class="analytics-card">
+            <h4>Subject Averages</h4>
+            ${subjectRows}
+          </div>
+          <div class="analytics-card">
+            <h4>Fee Collection Rate</h4>
+            ${feeRows}
+          </div>
+          <div class="analytics-card">
+            <h4>Top Performers</h4>
+            <ol class="analytics-list">${top}</ol>
+          </div>
+          <div class="analytics-card">
+            <h4>Needs Attention</h4>
+            <ol class="analytics-list">${bottom}</ol>
+          </div>
+        </div>
+        <div class="analytics-summary-grid">
+          <div class="summary-chip">Attendance Today: Present ${stats.attendance_today?.present || 0}, Late ${stats.attendance_today?.late || 0}, Absent ${stats.attendance_today?.absent || 0}</div>
+          <div class="summary-chip">Fees Collected Today: ₦${Number(stats.fee_collection_today || 0).toLocaleString()}</div>
+          <div class="summary-chip">Active Homework: ${stats.active_homework || 0}</div>
+          <div class="summary-chip">Upcoming Events: ${stats.upcoming_events || 0}</div>
+        </div>`;
+    }
   } catch (err) {
     showToast('Failed to load dashboard: ' + err.message, 'error');
+  }
+}
+
+async function loadAttendancePage() {
+  const classSelect = document.getElementById('attendance-class-select');
+  const dateInput = document.getElementById('attendance-date');
+  if (!classSelect || !dateInput) return;
+  const previousClassId = classSelect.value;
+
+  if (!dateInput.value) dateInput.value = new Date().toISOString().split('T')[0];
+  if (currentUser.role === 'teacher' && currentUser.class) {
+    const teacherClass = appData.classes.find(c => c.id === currentUser.class.id) || currentUser.class;
+    const pupilCount = Number(teacherClass?.pupil_count || 0);
+    classSelect.innerHTML = `<option value="${currentUser.class.id}">${currentUser.class.name}${pupilCount ? ` (${pupilCount})` : ''}</option>`;
+    classSelect.disabled = true;
+  } else {
+    classSelect.disabled = false;
+    classSelect.innerHTML = '<option value="">— Select Class —</option>' +
+      appData.classes.map(c => `<option value="${c.id}">${c.name}${Number(c.pupil_count || 0) ? ` (${c.pupil_count})` : ''}</option>`).join('');
+
+    if (previousClassId && appData.classes.some(c => c.id === previousClassId)) {
+      classSelect.value = previousClassId;
+    } else {
+      const defaultClass = appData.classes.find(c => Number(c.pupil_count || 0) > 0) || appData.classes[0];
+      if (defaultClass) classSelect.value = defaultClass.id;
+    }
+  }
+
+  const classId = classSelect.value;
+  if (!classId) {
+    document.getElementById('attendance-register').innerHTML = '<div class="empty">Select a class to load attendance.</div>';
+    return;
+  }
+  try {
+    const data = await apiFetch(`/api/attendance?class_id=${classId}&date=${dateInput.value}`);
+    renderAttendanceRegister(data);
+  } catch (err) {
+    document.getElementById('attendance-register').innerHTML = `<div class="empty">${err.message}</div>`;
+  }
+}
+
+function renderAttendanceRegister(data) {
+  const container = document.getElementById('attendance-register');
+  const badge = document.getElementById('attendance-summary-badge');
+  if (badge) badge.textContent = `${data.date} · P:${data.summary.present || 0} L:${data.summary.late || 0} A:${data.summary.absent || 0}`;
+  const rows = (data.records || []).map((p, idx) => {
+    const current = p.attendance_status || 'present';
+    return `
+      <tr>
+        <td>${idx + 1}</td>
+        <td><strong>${esc(p.last_name)}, ${esc(p.first_name)}</strong></td>
+        <td>${esc(p.parent_name || '—')}</td>
+        <td>
+          <select class="attendance-status" data-pupil-id="${p.id}">
+            <option value="present" ${current === 'present' ? 'selected' : ''}>Present</option>
+            <option value="late" ${current === 'late' ? 'selected' : ''}>Late</option>
+            <option value="absent" ${current === 'absent' ? 'selected' : ''}>Absent</option>
+          </select>
+        </td>
+        <td><input class="attendance-notes" data-pupil-id="${p.id}" value="${esc(p.attendance_notes || '')}" placeholder="Optional note" /></td>
+      </tr>`;
+  }).join('');
+  const selectedClass = appData.classes.find(c => c.id === data.class_id);
+  const otherClassesWithPupils = appData.classes.filter(c => c.id !== data.class_id && Number(c.pupil_count || 0) > 0);
+  container.innerHTML = rows ? `
+    <table class="data-table">
+      <thead><tr><th>#</th><th>Pupil</th><th>Parent</th><th>Status</th><th>Notes</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>` : `<div class="empty">${esc(selectedClass?.name || 'This class')} has no active pupils.${otherClassesWithPupils.length ? ` Try ${esc(otherClassesWithPupils[0].name)} or another class with pupils.` : ''}</div>`;
+}
+
+async function saveAttendanceRegister() {
+  const classId = document.getElementById('attendance-class-select')?.value;
+  const date = document.getElementById('attendance-date')?.value;
+  if (!classId || !date) return showToast('Select a class and date first', 'error');
+  const statuses = [...document.querySelectorAll('.attendance-status')].map(sel => ({
+    pupil_id: sel.dataset.pupilId,
+    status: sel.value,
+    notes: document.querySelector(`.attendance-notes[data-pupil-id="${sel.dataset.pupilId}"]`)?.value || ''
+  }));
+  try {
+    const res = await apiFetch('/api/attendance', {
+      method: 'POST',
+      body: JSON.stringify({ class_id: classId, date, records: statuses })
+    });
+    showToast(`${res.message}${res.alerts_sent ? ` • ${res.alerts_sent} absence alerts sent` : ''}`, 'success');
+    loadAttendancePage();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function publishCurrentResults() {
+  const termId = document.getElementById('results-term-select')?.value;
+  const classId = document.getElementById('results-class-select')?.value;
+  if (!termId) return showToast('Select a term first', 'error');
+  if (!confirm('Publish these results to parents via WhatsApp/SMS/email notifications?')) return;
+  try {
+    const res = await apiFetch('/api/results/publish', {
+      method: 'POST',
+      body: JSON.stringify({ term_id: termId, class_id: classId || null })
+    });
+    showToast(res.message, 'success');
+  } catch (err) {
+    showToast(err.message, 'error');
   }
 }
 
@@ -520,6 +721,27 @@ function pupilForm(pupil) {
           <div class="form-group">
             <label>Emergency Contact Phone</label>
             <input type="tel" name="emergency_phone" value="${pupil ? (pupil.emergency_phone || '') : ''}" />
+          </div>
+        </div>
+      </div>
+      <div class="form-section">
+        <h4>Medical Record</h4>
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Allergies</label>
+            <input type="text" name="allergies" value="${pupil ? (pupil.allergies || '') : ''}" />
+          </div>
+          <div class="form-group">
+            <label>Medical Conditions</label>
+            <input type="text" name="medical_conditions" value="${pupil ? (pupil.medical_conditions || '') : ''}" />
+          </div>
+          <div class="form-group">
+            <label>Doctor's Name</label>
+            <input type="text" name="doctor_name" value="${pupil ? (pupil.doctor_name || '') : ''}" />
+          </div>
+          <div class="form-group">
+            <label>Doctor's Phone</label>
+            <input type="tel" name="doctor_phone" value="${pupil ? (pupil.doctor_phone || '') : ''}" />
           </div>
         </div>
       </div>
@@ -941,6 +1163,7 @@ async function loadClasses() {
   try {
     const classes = await apiFetch('/api/classes');
     const teachers = await apiFetch('/api/teachers');
+    appData.classes = classes;
     container.innerHTML = classes.map(c => `
       <div class="class-card">
         <div class="class-card-title">${c.name}</div>
@@ -967,14 +1190,61 @@ async function loadClasses() {
         </div>
         ${currentUser.role === 'admin' ? `
         <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--gray-100)">
-          <button class="btn btn-sm btn-warning" style="width:100%" onclick="promoteClass('${c.id}', '${c.name}', ${c.level})">
-            🎓 ${c.level < 6 ? 'Promote to ' + c.name.replace(/\d/, c.level+1) : 'Graduate Class'}
+          <button class="btn btn-sm btn-warning" style="width:100%" onclick="promoteClass('${c.id}')">
+            🎓 ${getPromotionActionText(c)}
           </button>
         </div>` : ''}
       </div>`).join('');
   } catch (err) {
     container.innerHTML = `<div class="empty">Failed to load: ${err.message}</div>`;
   }
+}
+
+function getPromotionTargetClass(cls) {
+  if (!cls) return null;
+  const classType = cls.class_type || 'primary';
+  const level = Number(cls.level || 0);
+  if (classType === 'primary') {
+    if (level >= 6) return null;
+    return (appData.classes || []).find(c => (c.class_type || 'primary') === 'primary' && Number(c.level) === level + 1) || null;
+  }
+  if (classType === 'lower') {
+    if (level >= 3) {
+      return (appData.classes || []).find(c => (c.class_type || 'primary') === 'primary' && Number(c.level) === 1) || null;
+    }
+    return (appData.classes || []).find(c => (c.class_type || 'primary') === 'lower' && Number(c.level) === level + 1) || null;
+  }
+  return (appData.classes || []).find(c => Number(c.level) === level + 1) || null;
+}
+
+function getPromotionActionText(cls) {
+  const nextClass = getPromotionTargetClass(cls);
+  return nextClass ? `Promote to ${nextClass.name}` : 'Graduate Class';
+}
+
+function updatePromotionSelectionState() {
+  const checkboxes = [...document.querySelectorAll('.promotion-pupil-checkbox')];
+  const selected = checkboxes.filter(cb => cb.checked).length;
+  const total = checkboxes.length;
+  const label = document.getElementById('promotion-selected-count');
+  const button = document.getElementById('promotion-submit-btn');
+  const selectAll = document.getElementById('promotion-select-all');
+  if (label) label.textContent = `${selected} of ${total} pupil${total === 1 ? '' : 's'} selected`;
+  if (button) button.disabled = selected === 0;
+  if (selectAll) selectAll.checked = total > 0 && selected === total;
+}
+
+function togglePromotionSelectionAll(checked) {
+  document.querySelectorAll('.promotion-pupil-checkbox').forEach(cb => { cb.checked = checked; });
+  updatePromotionSelectionState();
+}
+
+async function refreshPromotionViews() {
+  await loadReferenceData();
+  const refreshTasks = [loadClasses(), loadDashboard()];
+  if (document.getElementById('page-pupils')?.classList.contains('active')) refreshTasks.push(loadPupils());
+  if (document.getElementById('page-settings')?.classList.contains('active')) refreshTasks.push(loadSettings());
+  await Promise.all(refreshTasks.map(task => Promise.resolve(task).catch(() => null)));
 }
 
 async function assignTeacher(classId) {
@@ -992,17 +1262,66 @@ async function assignTeacher(classId) {
   }
 }
 
-async function promoteClass(classId, className, level) {
-  const action = level < 6 ? 'promote' : 'graduate';
-  const msg = level < 6
-    ? `Promote all active pupils in ${className} to Primary ${level + 1}?`
-    : `Graduate all Primary 6 pupils? They will be marked as graduated.`;
+async function promoteClass(classId) {
+  const cls = (appData.classes || []).find(c => c.id === classId);
+  if (!cls) return showToast('Class information is unavailable. Please reload the page.', 'error');
+  const nextClass = getPromotionTargetClass(cls);
+  const pupils = await apiFetch(`/api/pupils?status=active&class_id=${classId}`);
+  if (!pupils.length) return showToast(`No active pupils found in ${cls.name}`, 'error');
+
+  openModal(nextClass ? `Promote ${cls.name}` : `Graduate ${cls.name}`, `
+    <div>
+      <p style="margin-bottom:12px;color:var(--gray-600)">
+        ${nextClass
+          ? `Select the pupils you want to promote from <strong>${cls.name}</strong> to <strong>${nextClass.name}</strong>.`
+          : `Select the pupils you want to graduate from <strong>${cls.name}</strong>.`}
+      </p>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--gray-700)">
+          <input type="checkbox" id="promotion-select-all" checked onchange="togglePromotionSelectionAll(this.checked)" />
+          Select all
+        </label>
+        <span id="promotion-selected-count" style="font-size:12px;color:var(--gray-500)"></span>
+      </div>
+      <div style="max-height:320px;overflow:auto;border:1px solid var(--gray-200);border-radius:8px;padding:8px;background:var(--gray-50)">
+        ${pupils.map((p, index) => `
+          <label style="display:flex;align-items:center;gap:10px;padding:10px 8px;border-bottom:${index < pupils.length - 1 ? '1px solid var(--gray-200)' : 'none'};cursor:pointer;background:white;border-radius:6px;margin-bottom:6px">
+            <input type="checkbox" class="promotion-pupil-checkbox" value="${p.id}" checked onchange="updatePromotionSelectionState()" />
+            <div style="flex:1">
+              <div style="font-size:13px;font-weight:600;color:#1f2937">${esc(p.last_name)}, ${esc(p.first_name)} ${esc(p.other_name || '')}</div>
+              <div style="font-size:11px;color:var(--gray-500)">${esc(p.admission_number || 'No admission number')}</div>
+            </div>
+          </label>
+        `).join('')}
+      </div>
+      <div style="margin-top:14px;display:flex;justify-content:flex-end;gap:8px">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button type="button" class="btn btn-warning" id="promotion-submit-btn" onclick="submitPromotionSelection('${classId}')">
+          ${nextClass ? `🎓 Promote Selected` : '🎓 Graduate Selected'}
+        </button>
+      </div>
+    </div>
+  `);
+  updatePromotionSelectionState();
+}
+
+async function submitPromotionSelection(classId) {
+  const cls = (appData.classes || []).find(c => c.id === classId);
+  const nextClass = getPromotionTargetClass(cls);
+  const selectedIds = [...document.querySelectorAll('.promotion-pupil-checkbox:checked')].map(cb => cb.value);
+  if (!selectedIds.length) return showToast('Select at least one pupil to continue', 'error');
+  const msg = nextClass
+    ? `Promote ${selectedIds.length} selected pupil${selectedIds.length === 1 ? '' : 's'} from ${cls.name} to ${nextClass.name}?`
+    : `Graduate ${selectedIds.length} selected pupil${selectedIds.length === 1 ? '' : 's'} from ${cls.name}?`;
   if (!confirm(msg)) return;
   try {
-    const result = await apiFetch(`/api/pupils/${classId}/promote`, { method: 'POST' });
+    const result = await apiFetch(`/api/pupils/${classId}/promote`, {
+      method: 'POST',
+      body: JSON.stringify({ pupil_ids: selectedIds })
+    });
     showToast(result.message, 'success');
-    loadClasses();
-    loadDashboard();
+    closeModal();
+    await refreshPromotionViews();
   } catch (err) {
     showToast('Error: ' + err.message, 'error');
   }
@@ -1366,6 +1685,15 @@ async function loadSettings() {
       loadParentAccountsList();
       loadNoticesAdminList();
       loadAuditLog();
+      loadReadinessStatus();
+      loadBackupList();
+      loadEventsList();
+      loadHomeworkAdminList();
+      loadTimetableAdminList();
+      loadPayrollList();
+      populateClassDropdown('broadcast-class', true);
+      const darkToggle = document.getElementById('dark-mode-toggle');
+      if (darkToggle) darkToggle.checked = document.body.classList.contains('dark-mode');
     }
   } catch (err) {
     showToast('Error loading settings: ' + err.message, 'error');
@@ -2898,7 +3226,7 @@ function openParentChild(childId, childName, classType) {
 function loadParentChildTab(tab) {
   _parentCurrentTab = tab;
   const buttons = document.querySelectorAll('#parent-child-tabs .tab-btn');
-  const tabNames = ['results', 'fees', 'report', 'acknowledge'];
+  const tabNames = ['results', 'fees', 'report', 'homework', 'timetable', 'acknowledge'];
   buttons.forEach((b, i) => b.classList.toggle('active', tabNames[i] === tab));
   const content = document.getElementById('parent-child-content');
 
@@ -2928,6 +3256,8 @@ function loadParentChildTab(tab) {
   if (tab === 'results') loadParentChildResults(selectedTerm);
   else if (tab === 'fees') loadParentChildFees(selectedTerm);
   else if (tab === 'report') loadParentChildReport(selectedTerm);
+  else if (tab === 'homework') loadParentChildHomework(selectedTerm);
+  else if (tab === 'timetable') loadParentChildTimetable(selectedTerm);
   else if (tab === 'acknowledge') loadParentChildAcknowledge(selectedTerm);
 }
 
@@ -3064,6 +3394,8 @@ async function loadParentChildFees(term) {
       </div>`}
       <div style="margin-top:12px">
         <button class="btn btn-primary" onclick="printBillForPupil('${_parentCurrentChild}','${term.id}')">🖨️ Print Fee Bill</button>
+        ${balance > 0 ? `<button class="btn btn-success" onclick="startParentOnlinePayment('${_parentCurrentChild}','${term.id}')">💳 Pay Now</button>` : ''}
+        <button class="btn btn-secondary" onclick="downloadFeeReceiptPdf('${_parentCurrentChild}','${term.id}')">📄 Receipt PDF</button>
       </div>`;
   } catch (err) {
     content.innerHTML = `<div class="empty">Failed to load: ${err.message}</div>`;
@@ -3082,9 +3414,437 @@ async function loadParentChildReport(term) {
         <button class="btn btn-primary" onclick="${isLower ? `_parentGenerateLowerReport('${term.id}')` : `_parentGenerateReport('${term.id}')`}">
           📄 Generate Report Card
         </button>
+        <button class="btn btn-secondary" onclick="downloadReportPdf('${_parentCurrentChild}','${term.id}')">
+          ⬇️ Download PDF
+        </button>
       </div>`;
   } catch (err) {
     content.innerHTML = `<div class="empty">Failed: ${err.message}</div>`;
+  }
+}
+
+async function loadParentChildHomework(term) {
+  const content = document.getElementById('parent-child-data');
+  try {
+    const rows = await apiFetch(`/api/homework?pupil_id=${_parentCurrentChild}`);
+    if (!rows.length) {
+      content.innerHTML = '<div class="empty">No homework posted yet.</div>';
+      return;
+    }
+    content.innerHTML = rows.map(row => `
+      <div class="settings-card" style="margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+          <div>
+            <div style="font-weight:700">${esc(row.title)}</div>
+            <div class="text-sm text-muted">${esc(row.subject_name || 'General')} · Due ${esc(row.due_date || 'TBA')}</div>
+          </div>
+          <span class="badge ${row.is_done ? 'badge-active' : ''}" style="${row.is_done ? '' : 'background:#fef3c7;color:#92400e'}">${row.is_done ? 'Done' : 'Pending'}</span>
+        </div>
+        <div style="margin-top:8px;color:var(--gray-600)">${esc(row.description || 'No description provided.')}</div>
+        <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input id="hw-note-${row.id}" placeholder="Optional note" value="${esc(row.parent_note || '')}" style="flex:1;min-width:180px" />
+          <button class="btn ${row.is_done ? 'btn-secondary' : 'btn-success'}" onclick="toggleHomeworkDone('${row.id}', '${_parentCurrentChild}', ${row.is_done ? 'false' : 'true'})">${row.is_done ? 'Mark Pending' : 'Mark Done'}</button>
+        </div>
+      </div>
+    `).join('');
+  } catch (err) {
+    content.innerHTML = `<div class="empty">${err.message}</div>`;
+  }
+}
+
+async function loadParentChildTimetable(term) {
+  const content = document.getElementById('parent-child-data');
+  try {
+    const rows = await apiFetch(`/api/timetable?pupil_id=${_parentCurrentChild}`);
+    if (!rows.length) return content.innerHTML = '<div class="empty">No timetable available yet.</div>';
+    const grouped = {};
+    rows.forEach(r => {
+      grouped[r.day_of_week] = grouped[r.day_of_week] || [];
+      grouped[r.day_of_week].push(r);
+    });
+    content.innerHTML = DAYS_OF_WEEK.map(day => `
+      <div class="settings-card" style="margin-bottom:12px">
+        <h4>${day}</h4>
+        ${(grouped[day] || []).map(r => `<div class="timetable-row"><span>${esc(r.start_time || '--')} - ${esc(r.end_time || '--')}</span><strong>${esc(r.subject_name || r.period_name || 'Period')}</strong><span>${esc(r.teacher_name || '')}</span></div>`).join('') || '<div class="empty-state">No periods</div>'}
+      </div>
+    `).join('');
+  } catch (err) {
+    content.innerHTML = `<div class="empty">${err.message}</div>`;
+  }
+}
+
+async function toggleHomeworkDone(homeworkId, pupilId, isDone) {
+  try {
+    await apiFetch(`/api/homework/${homeworkId}/complete`, {
+      method: 'POST',
+      body: JSON.stringify({
+        pupil_id: pupilId,
+        is_done: isDone,
+        parent_note: document.getElementById(`hw-note-${homeworkId}`)?.value || ''
+      })
+    });
+    showToast('Homework updated', 'success');
+    loadParentChildTab('homework');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function startParentOnlinePayment(pupilId, termId) {
+  try {
+    const bill = await apiFetch(`/api/parent/child/${pupilId}/fees/term/${termId}`);
+    const payments = bill.payments || [];
+    const targetItem = (bill.fee_items || []).find(item => {
+      const paid = payments.filter(p => p.fee_structure_id === item.id).reduce((s, p) => s + p.amount_paid, 0);
+      const due = bill.is_new_pupil ? item.new_pupil_amount : item.returning_pupil_amount;
+      return paid < due;
+    });
+    if (!targetItem) return showToast('No outstanding fee item found.', 'error');
+    const res = await apiFetch('/api/fees/payments/initialize', {
+      method: 'POST',
+      body: JSON.stringify({ pupil_id: pupilId, term_id: termId, fee_structure_id: targetItem.id })
+    });
+    if (res.authorization_url) {
+      window.open(res.authorization_url, '_blank');
+      showToast('Payment window opened. After payment, the portal will try to confirm it automatically.', 'success');
+    } else {
+      await apiFetch('/api/fees/payments/verify', { method: 'POST', body: JSON.stringify({ reference: res.reference }) });
+      showToast('Demo payment completed successfully.', 'success');
+      loadParentChildFees(appData.terms.find(t => t.id === termId) || { id: termId });
+    }
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function populateClassDropdown(id, includeBlank = false) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = (includeBlank ? '<option value="">— Select Class —</option>' : '') +
+    appData.classes.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+}
+
+function populateTeacherDropdown(id) {
+  const el = document.getElementById(id);
+  if (!el) return apiFetch('/api/teachers').then(teachers => {
+    el.innerHTML = teachers.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
+  });
+}
+
+async function loadEventsList() {
+  const el = document.getElementById('events-list');
+  if (!el) return;
+  try {
+    const events = await apiFetch('/api/events');
+    el.innerHTML = events.length ? events.map(ev => `
+      <div class="simple-list-row">
+        <div><strong>${esc(ev.title)}</strong><div class="text-sm text-muted">${esc(ev.event_date)} · ${esc(ev.event_type || 'general')}</div></div>
+        <div class="actions"><button class="btn-icon" onclick="openEventModal('${ev.id}')">✏️</button><button class="btn-icon" onclick="deleteEventItem('${ev.id}')">🗑️</button></div>
+      </div>`).join('') : '<div class="empty-state">No events yet.</div>';
+  } catch (err) { el.innerHTML = `<div class="empty-state">${esc(err.message)}</div>`; }
+}
+
+async function openEventModal(eventId = '') {
+  let existing = null;
+  if (eventId) existing = (await apiFetch('/api/events')).find(e => e.id === eventId);
+  openModal(eventId ? 'Edit Event' : 'Add Event', `
+    <form onsubmit="saveEventItem(event, '${eventId}')">
+      <div class="form-group"><label>Title</label><input id="event-title" value="${existing ? esc(existing.title) : ''}" required /></div>
+      <div class="form-grid">
+        <div class="form-group"><label>Date</label><input type="date" id="event-date" value="${existing?.event_date || ''}" required /></div>
+        <div class="form-group"><label>End Date</label><input type="date" id="event-end-date" value="${existing?.end_date || ''}" /></div>
+      </div>
+      <div class="form-grid">
+        <div class="form-group"><label>Type</label><input id="event-type" value="${existing?.event_type || 'general'}" /></div>
+        <div class="form-group"><label>Audience</label><select id="event-target"><option value="all">All</option><option value="parents">Parents</option><option value="teachers">Staff</option></select></div>
+      </div>
+      <div class="form-group"><label>Description</label><textarea id="event-description" rows="4">${existing?.description || ''}</textarea></div>
+      <button class="btn btn-primary" type="submit">Save Event</button>
+    </form>`);
+  if (existing) document.getElementById('event-target').value = existing.target || 'all';
+}
+
+async function saveEventItem(event, eventId = '') {
+  event.preventDefault();
+  const payload = {
+    title: document.getElementById('event-title').value,
+    event_date: document.getElementById('event-date').value,
+    end_date: document.getElementById('event-end-date').value,
+    event_type: document.getElementById('event-type').value,
+    target: document.getElementById('event-target').value,
+    description: document.getElementById('event-description').value
+  };
+  try {
+    await apiFetch(eventId ? `/api/events/${eventId}` : '/api/events', { method: eventId ? 'PUT' : 'POST', body: JSON.stringify(payload) });
+    showToast('Event saved', 'success');
+    closeModal();
+    loadEventsList();
+  } catch (err) { showToast(err.message, 'error'); }
+}
+
+async function deleteEventItem(eventId) {
+  if (!confirm('Delete this event?')) return;
+  try { await apiFetch(`/api/events/${eventId}`, { method: 'DELETE' }); showToast('Event deleted', 'success'); loadEventsList(); } catch (err) { showToast(err.message, 'error'); }
+}
+
+async function loadHomeworkAdminList() {
+  const el = document.getElementById('homework-admin-list');
+  if (!el) return;
+  try {
+    const items = await apiFetch('/api/homework');
+    el.innerHTML = items.length ? items.slice(0, 10).map(item => `
+      <div class="simple-list-row">
+        <div><strong>${esc(item.title)}</strong><div class="text-sm text-muted">${esc(item.subject_name || 'General')} · Due ${esc(item.due_date || 'TBA')}</div></div>
+        <div class="actions"><button class="btn-icon" onclick="openHomeworkModal('${item.id}')">✏️</button><button class="btn-icon" onclick="deleteHomeworkItem('${item.id}')">🗑️</button></div>
+      </div>`).join('') : '<div class="empty-state">No homework posted.</div>';
+  } catch (err) { el.innerHTML = `<div class="empty-state">${esc(err.message)}</div>`; }
+}
+
+async function openHomeworkModal(homeworkId = '') {
+  let existing = null;
+  if (homeworkId) existing = (await apiFetch('/api/homework')).find(h => h.id === homeworkId);
+  populateClassDropdown('broadcast-class', true);
+  openModal(homeworkId ? 'Edit Homework' : 'Add Homework', `
+    <form onsubmit="saveHomeworkItem(event, '${homeworkId}')">
+      <div class="form-group"><label>Title</label><input id="hw-title" value="${existing ? esc(existing.title) : ''}" required /></div>
+      <div class="form-grid">
+        <div class="form-group"><label>Class</label><select id="hw-class"></select></div>
+        <div class="form-group"><label>Subject</label><select id="hw-subject"><option value="">General</option>${appData.subjects.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div>
+      </div>
+      <div class="form-group"><label>Due Date</label><input type="date" id="hw-due" value="${existing?.due_date || ''}" /></div>
+      <div class="form-group"><label>Description</label><textarea id="hw-desc" rows="4">${existing?.description || ''}</textarea></div>
+      <button class="btn btn-primary" type="submit">Save Homework</button>
+    </form>`);
+  populateClassDropdown('hw-class');
+  if (existing) {
+    document.getElementById('hw-class').value = existing.class_id || '';
+    document.getElementById('hw-subject').value = existing.subject_id || '';
+  }
+}
+
+async function saveHomeworkItem(event, homeworkId = '') {
+  event.preventDefault();
+  const payload = {
+    title: document.getElementById('hw-title').value,
+    class_id: document.getElementById('hw-class').value,
+    subject_id: document.getElementById('hw-subject').value || null,
+    due_date: document.getElementById('hw-due').value,
+    description: document.getElementById('hw-desc').value
+  };
+  try {
+    await apiFetch(homeworkId ? `/api/homework/${homeworkId}` : '/api/homework', { method: homeworkId ? 'PUT' : 'POST', body: JSON.stringify(payload) });
+    showToast('Homework saved', 'success');
+    closeModal();
+    loadHomeworkAdminList();
+  } catch (err) { showToast(err.message, 'error'); }
+}
+
+async function deleteHomeworkItem(homeworkId) {
+  if (!confirm('Archive this homework item?')) return;
+  try { await apiFetch(`/api/homework/${homeworkId}`, { method: 'DELETE' }); showToast('Homework archived', 'success'); loadHomeworkAdminList(); } catch (err) { showToast(err.message, 'error'); }
+}
+
+async function loadTimetableAdminList() {
+  const el = document.getElementById('timetable-admin-list');
+  if (!el) return;
+  try {
+    const cls = appData.classes[0];
+    const rows = cls ? await apiFetch(`/api/timetable?class_id=${cls.id}`) : [];
+    el.innerHTML = rows.length ? rows.slice(0, 10).map(r => `
+      <div class="simple-list-row">
+        <div><strong>${esc(r.day_of_week)} ${esc(r.start_time || '')}</strong><div class="text-sm text-muted">${esc(r.subject_name || r.period_name || 'Period')}</div></div>
+        <div class="actions"><button class="btn-icon" onclick="openTimetableModal('${r.id}')">✏️</button><button class="btn-icon" onclick="deleteTimetableItem('${r.id}')">🗑️</button></div>
+      </div>`).join('') : '<div class="empty-state">No timetable entries yet.</div>';
+  } catch (err) { el.innerHTML = `<div class="empty-state">${esc(err.message)}</div>`; }
+}
+
+async function openTimetableModal(timetableId = '') {
+  let existing = null;
+  if (timetableId) {
+    for (const cls of appData.classes) {
+      const rows = await apiFetch(`/api/timetable?class_id=${cls.id}`);
+      existing = rows.find(r => r.id === timetableId);
+      if (existing) break;
+    }
+  }
+  openModal(timetableId ? 'Edit Timetable Entry' : 'Add Timetable Entry', `
+    <form onsubmit="saveTimetableItem(event, '${timetableId}')">
+      <div class="form-grid">
+        <div class="form-group"><label>Class</label><select id="tt-class"></select></div>
+        <div class="form-group"><label>Day</label><select id="tt-day">${DAYS_OF_WEEK.map(d => `<option value="${d}">${d}</option>`).join('')}</select></div>
+      </div>
+      <div class="form-grid">
+        <div class="form-group"><label>Subject</label><select id="tt-subject"><option value="">General</option>${appData.subjects.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div>
+        <div class="form-group"><label>Period Name</label><input id="tt-period" value="${existing?.period_name || ''}" /></div>
+      </div>
+      <div class="form-grid">
+        <div class="form-group"><label>Start Time</label><input type="time" id="tt-start" value="${existing?.start_time || ''}" /></div>
+        <div class="form-group"><label>End Time</label><input type="time" id="tt-end" value="${existing?.end_time || ''}" /></div>
+      </div>
+      <div class="form-grid">
+        <div class="form-group"><label>Teacher Name</label><input id="tt-teacher" value="${existing?.teacher_name || ''}" /></div>
+        <div class="form-group"><label>Location</label><input id="tt-location" value="${existing?.location || ''}" /></div>
+      </div>
+      <button class="btn btn-primary" type="submit">Save Entry</button>
+    </form>`);
+  populateClassDropdown('tt-class');
+  if (existing) {
+    document.getElementById('tt-class').value = existing.class_id || '';
+    document.getElementById('tt-day').value = existing.day_of_week || 'Monday';
+    document.getElementById('tt-subject').value = existing.subject_id || '';
+  }
+}
+
+async function saveTimetableItem(event, timetableId = '') {
+  event.preventDefault();
+  const payload = {
+    class_id: document.getElementById('tt-class').value,
+    day_of_week: document.getElementById('tt-day').value,
+    subject_id: document.getElementById('tt-subject').value || null,
+    period_name: document.getElementById('tt-period').value,
+    start_time: document.getElementById('tt-start').value,
+    end_time: document.getElementById('tt-end').value,
+    teacher_name: document.getElementById('tt-teacher').value,
+    location: document.getElementById('tt-location').value
+  };
+  try {
+    await apiFetch(timetableId ? `/api/timetable/${timetableId}` : '/api/timetable', { method: timetableId ? 'PUT' : 'POST', body: JSON.stringify(payload) });
+    showToast('Timetable saved', 'success');
+    closeModal();
+    loadTimetableAdminList();
+  } catch (err) { showToast(err.message, 'error'); }
+}
+
+async function deleteTimetableItem(timetableId) {
+  if (!confirm('Delete this timetable entry?')) return;
+  try { await apiFetch(`/api/timetable/${timetableId}`, { method: 'DELETE' }); showToast('Timetable deleted', 'success'); loadTimetableAdminList(); } catch (err) { showToast(err.message, 'error'); }
+}
+
+async function loadPayrollList() {
+  const el = document.getElementById('payroll-list');
+  if (!el) return;
+  try {
+    const rows = await apiFetch('/api/payroll');
+    el.innerHTML = rows.length ? rows.slice(0, 10).map(r => `
+      <div class="simple-list-row">
+        <div><strong>${esc(r.staff_name)}</strong><div class="text-sm text-muted">${r.month}/${r.year}</div></div>
+        <div class="text-success">₦${Number(r.net_pay || 0).toLocaleString()}</div>
+      </div>`).join('') : '<div class="empty-state">No payroll entries yet.</div>';
+  } catch (err) { el.innerHTML = `<div class="empty-state">${esc(err.message)}</div>`; }
+}
+
+async function openPayrollModal() {
+  const teachers = await apiFetch('/api/teachers');
+  openModal('Add Payroll Entry', `
+    <form onsubmit="savePayrollEntry(event)">
+      <div class="form-grid">
+        <div class="form-group"><label>Staff</label><select id="payroll-staff">${teachers.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select></div>
+        <div class="form-group"><label>Month</label><input type="number" id="payroll-month" min="1" max="12" value="${new Date().getMonth() + 1}" /></div>
+      </div>
+      <div class="form-grid">
+        <div class="form-group"><label>Year</label><input type="number" id="payroll-year" value="${new Date().getFullYear()}" /></div>
+        <div class="form-group"><label>Basic Salary</label><input type="number" id="payroll-basic" min="0" value="0" /></div>
+      </div>
+      <div class="form-grid">
+        <div class="form-group"><label>Allowances</label><input type="number" id="payroll-allowances" min="0" value="0" /></div>
+        <div class="form-group"><label>Deductions</label><input type="number" id="payroll-deductions" min="0" value="0" /></div>
+      </div>
+      <div class="form-group"><label>Notes</label><textarea id="payroll-notes" rows="3"></textarea></div>
+      <button class="btn btn-primary" type="submit">Save Payroll</button>
+    </form>`);
+}
+
+async function savePayrollEntry(event) {
+  event.preventDefault();
+  try {
+    const res = await apiFetch('/api/payroll', {
+      method: 'POST',
+      body: JSON.stringify({
+        staff_id: document.getElementById('payroll-staff').value,
+        month: Number(document.getElementById('payroll-month').value),
+        year: Number(document.getElementById('payroll-year').value),
+        basic_salary: Number(document.getElementById('payroll-basic').value || 0),
+        allowances: Number(document.getElementById('payroll-allowances').value || 0),
+        deductions: Number(document.getElementById('payroll-deductions').value || 0),
+        notes: document.getElementById('payroll-notes').value
+      })
+    });
+    showToast(`Payroll saved • Net pay ₦${Number(res.net_pay || 0).toLocaleString()}`, 'success');
+    closeModal();
+    loadPayrollList();
+  } catch (err) { showToast(err.message, 'error'); }
+}
+
+async function sendBroadcastMessage() {
+  try {
+    const res = await apiFetch('/api/broadcast', {
+      method: 'POST',
+      body: JSON.stringify({
+        target: document.getElementById('broadcast-target')?.value,
+        class_id: document.getElementById('broadcast-class')?.value || null,
+        channel: document.getElementById('broadcast-channel')?.value,
+        message: document.getElementById('broadcast-message')?.value
+      })
+    });
+    showToast(res.message, 'success');
+    if (document.getElementById('broadcast-message')) document.getElementById('broadcast-message').value = '';
+  } catch (err) { showToast(err.message, 'error'); }
+}
+
+async function runAcademicRollover() {
+  if (!confirm('Run the academic year rollover wizard? This promotes pupils and creates next year terms.')) return;
+  try {
+    const res = await apiFetch('/api/rollover', {
+      method: 'POST',
+      body: JSON.stringify({ next_academic_year: document.getElementById('rollover-year')?.value || '' })
+    });
+    showToast(`${res.message} • Promoted: ${res.promoted}, Graduated: ${res.graduated}`, 'success');
+    loadSettings();
+    loadClasses();
+  } catch (err) { showToast(err.message, 'error'); }
+}
+
+async function downloadReportPdf(pupilId, termId) {
+  const token = localStorage.getItem('token');
+  const res = await fetch(`/api/pupils/${pupilId}/report-pdf/term/${termId}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) return showToast('Failed to download report PDF', 'error');
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'report-card.pdf';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function downloadFeeReceiptPdf(pupilId, termId) {
+  const token = localStorage.getItem('token');
+  const res = await fetch(`/api/pupils/${pupilId}/receipt-pdf/term/${termId}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) return showToast('Failed to download receipt PDF', 'error');
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'fee-receipt.pdf';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function toggleDarkMode(enabled) {
+  document.body.classList.toggle('dark-mode', enabled);
+  localStorage.setItem('darkMode', enabled ? '1' : '0');
+}
+
+function applyStoredTheme() {
+  const enabled = localStorage.getItem('darkMode') === '1';
+  document.body.classList.toggle('dark-mode', enabled);
+  const toggle = document.getElementById('dark-mode-toggle');
+  if (toggle) toggle.checked = enabled;
+}
+
+function registerServiceWorker() {
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
 }
 
@@ -3220,6 +3980,78 @@ async function loadParentAccountsList() {
       </div>`).join('');
   } catch (err) {
     el.innerHTML = `<div class="empty" style="font-size:12px">Error: ${err.message}</div>`;
+  }
+}
+
+async function loadReadinessStatus() {
+  const el = document.getElementById('readiness-list');
+  if (!el) return;
+  try {
+    const report = await apiFetch('/api/admin/readiness');
+    const summary = report.summary || { ok: 0, warning: 0, error: 0 };
+    const checks = report.checks || [];
+    const pill = (label, value, color) => `
+      <span style="display:inline-block;padding:4px 8px;border-radius:999px;font-size:12px;font-weight:600;background:${color};color:white">${label}: ${value}</span>`;
+    el.innerHTML = `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+        ${pill('OK', summary.ok || 0, '#15803d')}
+        ${pill('Warnings', summary.warning || 0, '#d97706')}
+        ${pill('Errors', summary.error || 0, '#dc2626')}
+      </div>
+      <div style="font-size:12px;color:var(--gray-500);margin-bottom:10px">
+        Environment: <strong>${esc(report.environment || 'unknown')}</strong>
+        ${report.bootstrap?.message ? ` · ${esc(report.bootstrap.message)}` : ''}
+      </div>
+      <div style="max-height:260px;overflow:auto">
+        ${(checks.length ? checks : []).map(check => {
+          const tone = check.status === 'ok' ? '#15803d' : check.status === 'warning' ? '#d97706' : '#dc2626';
+          return `
+            <div style="border-bottom:1px solid var(--gray-100);padding:8px 0">
+              <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+                <strong style="font-size:13px">${esc(check.label)}</strong>
+                <span style="font-size:11px;font-weight:700;color:${tone};text-transform:uppercase">${esc(check.status)}</span>
+              </div>
+              <div style="font-size:12px;color:var(--gray-500);margin-top:4px">${esc(check.message)}</div>
+            </div>`;
+        }).join('') || '<div class="empty-state">No readiness information available.</div>'}
+      </div>`;
+  } catch (err) {
+    el.innerHTML = `<div class="empty-state">${esc(err.message)}</div>`;
+  }
+}
+
+async function loadBackupList() {
+  const el = document.getElementById('backup-list');
+  if (!el) return;
+  try {
+    const data = await apiFetch('/api/admin/backups');
+    const backups = data.backups || [];
+    el.innerHTML = backups.length ? `
+      <div style="max-height:240px;overflow:auto">
+        ${backups.map(item => `
+          <div style="border-bottom:1px solid var(--gray-100);padding:8px 0">
+            <div style="font-size:13px;font-weight:600">${esc(item.filename)}</div>
+            <div style="font-size:12px;color:var(--gray-500)">${new Date(item.modified_at).toLocaleString()}</div>
+            <div style="font-size:12px;color:var(--gray-400)">${Number(item.size || 0).toLocaleString()} bytes</div>
+          </div>`).join('')}
+      </div>` : '<div class="empty-state">No backups created yet.</div>';
+  } catch (err) {
+    el.innerHTML = `<div class="empty-state">${esc(err.message)}</div>`;
+  }
+}
+
+async function createSystemBackup() {
+  try {
+    const label = document.getElementById('backup-label')?.value || '';
+    const res = await apiFetch('/api/admin/backups', {
+      method: 'POST',
+      body: JSON.stringify({ label })
+    });
+    showToast(res.message || 'Backup created', 'success');
+    if (document.getElementById('backup-label')) document.getElementById('backup-label').value = '';
+    loadBackupList();
+  } catch (err) {
+    showToast(err.message, 'error');
   }
 }
 

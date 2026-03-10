@@ -23,6 +23,12 @@
 ✅ Parent portal: parents log in to view results, fees, download report cards, and acknowledge
 ✅ School notices: post announcements visible to parents and/or staff
 ✅ ID card generation and printing for pupils
+✅ Daily attendance tracking with absence alerts
+✅ WhatsApp/SMS notification hooks for results, fee receipts, absence alerts and broadcasts
+✅ Paystack online fee payment initialization and verification flow
+✅ Performance analytics dashboard cards for academics and fee collection
+✅ Homework, events calendar, timetable, payroll and academic rollover tools
+✅ PWA support, dark mode and server-side PDF download endpoints
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -57,8 +63,19 @@ MANUAL START (any system):
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- DEFAULT LOGIN DETAILS
+ FIRST ADMIN LOGIN / SECURE BOOTSTRAP
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For production, set these environment variables before first start:
+
+  INITIAL_ADMIN_NAME
+  INITIAL_ADMIN_EMAIL
+  INITIAL_ADMIN_PASSWORD
+
+The app now avoids automatically creating an insecure default admin in production.
+
+FOR LOCAL DEVELOPMENT ONLY (optional):
+  Set ALLOW_DEFAULT_ADMIN=true if you want the old quick-start admin account.
 
   Email:    admin@school.com
   Password: admin123
@@ -77,6 +94,7 @@ FIRST TIME SETUP (do this in order):
     - Go to Settings → add any additional subjects if needed
     - Confirm the current academic year and term are correct
     - Change the admin password
+    - Configure events, homework, timetable, payroll and broadcast tools as needed
 
   Step 2 — Teachers:
     - Go to Teachers → Add each teacher
@@ -94,12 +112,32 @@ FIRST TIME SETUP (do this in order):
     - Select a Class, Term, and Subject
     - Enter CA scores (max 40) and Exam scores (max 60) for each pupil
     - Click "Save All Results"
+    - Use "Publish Results" to notify parents after entry
 
-  Step 6 — Report Cards:
+  Step 6 — Attendance:
+    - Go to Attendance
+    - Select class and date
+    - Mark Present / Late / Absent
+    - Save to record attendance and send configured absence alerts
+
+  Step 7 — Report Cards:
     - Go to Pupils → click the eye icon to view a pupil profile
     - Select the term and click "Report Card"
     - The report card will open — click "Print / Save as PDF"
     - In the print dialog, choose "Save as PDF" to get a PDF file
+
+  Step 8 — Parent Portal Additions:
+    - Parents can view homework, timetable, notices, fees and report cards
+    - Parents can download report/receipt PDFs
+    - Parents can use Paystack payment where configured
+
+  Step 9 — Admin Operations Tools:
+    - Settings → Calendar & Events
+    - Settings → Homework & Assignments
+    - Settings → Class Timetable
+    - Settings → Broadcast Messages
+    - Settings → Payroll
+    - Settings → Academic Year Rollover
 
 
 END OF YEAR — PROMOTION:
@@ -138,6 +176,11 @@ PARENT ACCESS:
     - Replace the "school.db" file with your backup copy
     - Start the server again
 
+  NEW:
+    - The app can now create timestamped SQLite backups in the backups/ folder
+    - Admins can review readiness checks and backups from Settings
+    - Health endpoint now reports deployment/readiness summary
+
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  FILE STRUCTURE
@@ -165,6 +208,63 @@ PARENT ACCESS:
   • SMS/Email notifications to parents
   • Bulk report card printing for entire class
   • Secondary school expansion (JSS 1–3, SS 1–3)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ INTEGRATIONS / PRODUCTION SETUP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+To enable the new integrations, configure these environment variables:
+
+  Core runtime / security:
+    ENVIRONMENT=production
+    DATA_DIR=/data
+    ALLOWED_ORIGIN=https://your-app.up.railway.app
+    INITIAL_ADMIN_NAME
+    INITIAL_ADMIN_EMAIL
+    INITIAL_ADMIN_PASSWORD
+    ALLOW_DEFAULT_ADMIN=false
+    ALLOW_DESTRUCTIVE_MIGRATIONS=false
+    LOG_LEVEL=INFO
+
+  Paystack:
+    PAYSTACK_PUBLIC_KEY
+    PAYSTACK_SECRET_KEY
+    PAYSTACK_CALLBACK_URL
+
+  Termii WhatsApp / SMS:
+    TERMII_API_KEY
+    TERMII_SENDER
+    TERMII_SMS_ENDPOINT
+    TERMII_WHATSAPP_ENDPOINT
+
+  Meta WhatsApp Cloud API (optional alternative):
+    META_WHATSAPP_ACCESS_TOKEN
+    META_WHATSAPP_PHONE_NUMBER_ID
+
+  General:
+    APP_URL
+
+For server-side PDF generation, install WeasyPrint and any OS packages it requires.
+
+Production checklist:
+  1. Mount persistent storage and set DATA_DIR
+  2. Set ALLOWED_ORIGIN to your real frontend domain
+  3. Set INITIAL_ADMIN_EMAIL and INITIAL_ADMIN_PASSWORD
+  4. Configure SMTP if you need email notices
+  5. Configure Paystack if you need online payments
+  6. Configure Termii or Meta WhatsApp if you need SMS/WhatsApp
+  7. Confirm /health returns status=ok after deployment
+  8. Create an initial manual backup after first setup
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ TESTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Run the automated backend checks with:
+
+  python3 -m unittest discover -s tests -v
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

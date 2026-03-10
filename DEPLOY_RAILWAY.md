@@ -44,14 +44,22 @@ Share this with staff and parents.
 |----------|-------|---------|
 | `PORT` | (set automatically by Railway) | HTTP port |
 | `DATA_DIR` | `/data` | Where database and uploads are stored |
+| `ENVIRONMENT` | `production` | Enables production safety checks |
+| `ALLOWED_ORIGIN` | `https://your-app.up.railway.app` | Restricts browser access to your real domain |
+| `APP_URL` | `https://your-app.up.railway.app` | Public base URL for links and callbacks |
+| `INITIAL_ADMIN_NAME` | `School Admin` | Name of first admin |
+| `INITIAL_ADMIN_EMAIL` | your real admin email | Secure first admin login |
+| `INITIAL_ADMIN_PASSWORD` | strong password | Secure first admin password |
+| `ALLOW_DEFAULT_ADMIN` | `false` | Prevents insecure demo admin in production |
+| `ALLOW_DESTRUCTIVE_MIGRATIONS` | `false` | Prevents destructive schema repair unless explicitly allowed |
 
 ---
 
-## Default Login (first run)
-- **Email:** admin@school.com
-- **Password:** admin123
+## First Login (first run)
 
-⚠️ **Change this password immediately after first login** via Settings.
+Use the `INITIAL_ADMIN_EMAIL` and `INITIAL_ADMIN_PASSWORD` values you configured.
+
+⚠️ The app is now designed to avoid creating an insecure default admin automatically in production.
 
 ---
 
@@ -69,3 +77,15 @@ git commit -m "Update"
 git push
 ```
 Railway redeploys automatically. Your data on `/data` is untouched.
+
+---
+
+## Recommended verification after deploy
+
+1. Open `/health` and confirm the app reports `status: ok`
+2. Sign in with your configured admin account
+3. Go to **Settings** and review:
+   - Production readiness
+   - Backup list
+4. Create a manual backup after initial setup
+5. Test SMTP / Paystack / WhatsApp integrations before going live
