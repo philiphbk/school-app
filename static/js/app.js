@@ -19,6 +19,41 @@ const SCHOOL = {
   logo: '/gisl_logo.png'  // served from /static/gisl_logo.png
 };
 
+// ─── SECURITY ─────────────────────────────────────────────────────────────────
+function esc(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// ─── SESSION TIMEOUT ──────────────────────────────────────────────────────────
+let _sessionTimer = null;
+let _sessionWarnTimer = null;
+
+function resetSessionTimers() {
+  clearTimeout(_sessionTimer);
+  clearTimeout(_sessionWarnTimer);
+  // Warn 5 minutes before 24-hour session expires (at 23h55m)
+  _sessionWarnTimer = setTimeout(showSessionWarning, (23 * 60 + 55) * 60 * 1000);
+  _sessionTimer = setTimeout(() => logout(), 24 * 60 * 60 * 1000);
+}
+
+function showSessionWarning() {
+  showToast('Your session expires in 5 minutes. Save your work or click to stay logged in.', 'warning', 0);
+  document.getElementById('toast').onclick = async () => {
+    try { await apiFetch('/api/auth/me'); resetSessionTimers(); hideToast(); } catch {}
+  };
+}
+
+function hideToast() {
+  const toast = document.getElementById('toast');
+  if (toast) { toast.classList.add('hidden'); toast.onclick = null; }
+}
+
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
 
 async function apiFetch(path, options = {}) {
@@ -27,6 +62,17 @@ async function apiFetch(path, options = {}) {
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(API + path, { ...options, headers });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    localStorage.removeItem('token');
+    currentUser = null;
+    document.getElementById('app').classList.add('hidden');
+    document.getElementById('login-page').classList.remove('hidden');
+    const btn = document.getElementById('login-btn');
+    btn.textContent = 'Sign In';
+    btn.disabled = false;
+    document.getElementById('login-error').classList.add('hidden');
+    throw new Error('Session expired. Please sign in again.');
+  }
   if (!res.ok) throw new Error(data.error || 'Request failed');
   return data;
 }
@@ -48,6 +94,10 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
     });
     localStorage.setItem('token', data.token);
     currentUser = data.user;
+    if (data.user.must_change_password) {
+      showForcePasswordChange();
+      return;
+    }
     startApp();
   } catch (err) {
     errEl.textContent = err.message;
@@ -58,6 +108,8 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 });
 
 async function logout() {
+  clearTimeout(_sessionTimer);
+  clearTimeout(_sessionWarnTimer);
   try { await apiFetch('/api/auth/logout', { method: 'POST' }); } catch {}
   localStorage.removeItem('token');
   currentUser = null;
@@ -82,9 +134,58 @@ async function initAuth() {
   }
 }
 
+function showForcePasswordChange() {
+  document.getElementById('login-page').classList.add('hidden');
+  document.getElementById('app').classList.add('hidden');
+  const overlay = document.getElementById('force-pw-overlay');
+  if (overlay) overlay.classList.remove('hidden');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const form = document.getElementById('force-pw-form');
+  if (!form) return;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const pw = document.getElementById('force-new-pw').value;
+    const confirm = document.getElementById('force-confirm-pw').value;
+    const errEl = document.getElementById('force-pw-error');
+    const btn = document.getElementById('force-pw-btn');
+    errEl.classList.add('hidden');
+    if (pw !== confirm) {
+      errEl.textContent = 'Passwords do not match.';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    if (pw.length < 6) {
+      errEl.textContent = 'Password must be at least 6 characters.';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    try {
+      await apiFetch('/api/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({ new_password: pw })
+      });
+      currentUser.must_change_password = false;
+      startApp();
+    } catch (err) {
+      errEl.textContent = err.message || 'Failed to change password.';
+      errEl.classList.remove('hidden');
+      btn.disabled = false;
+      btn.textContent = 'Set Password';
+    }
+  });
+});
+
 // ─── APP START ────────────────────────────────────────────────────────────────
 
 async function startApp() {
+  resetSessionTimers();
+  // Hide force-password-change overlay if shown
+  const forcePw = document.getElementById('force-pw-overlay');
+  if (forcePw) forcePw.classList.add('hidden');
   document.getElementById('login-page').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
 
@@ -278,17 +379,17 @@ function renderPupilsTable(pupils) {
             <div class="pupil-info">
               ${p.photo
                 ? `<div class="pupil-avatar"><img src="${p.photo}" alt="photo"/></div>`
-                : `<div class="pupil-avatar">${p.first_name.charAt(0)}${p.last_name.charAt(0)}</div>`}
+                : `<div class="pupil-avatar">${esc(p.first_name).charAt(0)}${esc(p.last_name).charAt(0)}</div>`}
               <div>
-                <div class="pupil-name">${p.last_name}, ${p.first_name} ${p.other_name || ''}</div>
-                <div class="pupil-adm">${p.admission_number || ''}</div>
+                <div class="pupil-name">${esc(p.last_name)}, ${esc(p.first_name)} ${esc(p.other_name || '')}</div>
+                <div class="pupil-adm">${esc(p.admission_number || '')}</div>
               </div>
             </div>
           </td>
-          <td>${p.admission_number || '—'}</td>
-          <td>${p.class_name || '<span class="text-muted">—</span>'}</td>
+          <td>${esc(p.admission_number || '—')}</td>
+          <td>${p.class_name ? esc(p.class_name) : '<span class="text-muted">—</span>'}</td>
           <td><span class="badge badge-${p.gender}">${p.gender || '—'}</span></td>
-          <td>${p.parent_phone || '<span class="text-muted">—</span>'}</td>
+          <td>${p.parent_phone ? esc(p.parent_phone) : '<span class="text-muted">—</span>'}</td>
           <td>
             <div class="actions">
               <button class="btn-icon" title="View Profile" onclick="viewPupil('${p.id}')">👁️</button>
@@ -493,8 +594,8 @@ function pupilProfile(p, terms) {
         ${p.photo ? `<img src="${p.photo}" />` : p.first_name.charAt(0) + p.last_name.charAt(0)}
       </div>
       <div>
-        <div class="profile-name">${p.last_name}, ${p.first_name} ${p.other_name || ''}</div>
-        <div class="profile-meta">${p.admission_number || ''} · ${p.class_name || 'No class'}</div>
+        <div class="profile-name">${esc(p.last_name)}, ${esc(p.first_name)} ${esc(p.other_name || '')}</div>
+        <div class="profile-meta">${esc(p.admission_number || '')} · ${esc(p.class_name || 'No class')}</div>
         <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
           <span class="badge badge-${p.gender}">${p.gender || '—'}</span>
           <span class="badge badge-active">Active</span>
@@ -514,10 +615,10 @@ function pupilProfile(p, terms) {
       </div>
       <div class="info-card">
         <h4>Parent / Guardian</h4>
-        ${infoRow('Name', p.parent_name || '—')}
-        ${infoRow('Relationship', p.parent_relationship || '—')}
-        ${infoRow('Phone', p.parent_phone || '—')}
-        ${infoRow('Email', p.parent_email || '—')}
+        ${infoRow('Name', esc(p.parent_name || '—'))}
+        ${infoRow('Relationship', esc(p.parent_relationship || '—'))}
+        ${infoRow('Phone', esc(p.parent_phone || '—'))}
+        ${infoRow('Email', esc(p.parent_email || '—'))}
       </div>
     </div>
     <div style="margin-top:12px;background:white;border:1px solid var(--gray-200);border-radius:8px;padding:16px">
@@ -567,7 +668,7 @@ async function viewPupilResults(pupilId) {
     const rows = results.map(r => {
       const total = (r.ca_score || 0) + (r.exam_score || 0);
       return `<tr>
-        <td>${r.subject_name}</td>
+        <td>${esc(r.subject_name)}</td>
         <td style="text-align:center">${r.ca_score || 0}</td>
         <td style="text-align:center">${r.exam_score || 0}</td>
         <td style="text-align:center;font-weight:700">${total}</td>
@@ -608,7 +709,7 @@ async function viewPupilAcknowledgments(pupilId) {
         <td>${termLabel}</td>
         <td><span class="badge badge-active">✅ Acknowledged</span></td>
         <td>${date}</td>
-        <td style="font-style:italic;color:var(--gray-500)">${a.parent_comment || '—'}</td>
+        <td style="font-style:italic;color:var(--gray-500)">${esc(a.parent_comment || '—')}</td>
       </tr>`;
     }).join('');
     el.innerHTML = `
@@ -733,13 +834,13 @@ async function loadTeachers() {
           <tr>
             <td>
               <div style="display:flex;align-items:center;gap:10px">
-                <div class="user-avatar" style="width:32px;height:32px;font-size:13px">${t.name.charAt(0)}</div>
-                <strong>${t.name}</strong>
+                <div class="user-avatar" style="width:32px;height:32px;font-size:13px">${esc(t.name).charAt(0)}</div>
+                <strong>${esc(t.name)}</strong>
               </div>
             </td>
-            <td>${t.email}</td>
-            <td>${t.phone || '—'}</td>
-            <td>${t.class_name ? `<span class="badge badge-active">${t.class_name}</span>` : '<span class="text-muted">Unassigned</span>'}</td>
+            <td>${esc(t.email)}</td>
+            <td>${t.phone ? esc(t.phone) : '—'}</td>
+            <td>${t.class_name ? `<span class="badge badge-active">${esc(t.class_name)}</span>` : '<span class="text-muted">Unassigned</span>'}</td>
             <td>
               <div class="actions">
                 <button class="btn-icon" title="Edit" onclick="editTeacher(${JSON.stringify(t).replace(/"/g, '&quot;')})">✏️</button>
@@ -845,7 +946,7 @@ async function loadClasses() {
         <div class="class-card-title">${c.name}</div>
         <div class="class-card-info">
           ${c.teacher_name
-            ? `<span style="color:var(--success)">👩‍🏫 ${c.teacher_name}</span>`
+            ? `<span style="color:var(--success)">👩‍🏫 ${esc(c.teacher_name)}</span>`
             : `<span style="color:var(--gray-400)">No teacher assigned</span>`}
         </div>
         <div style="display:flex;gap:8px;align-items:center;background:var(--gray-50);border-radius:6px;padding:10px">
@@ -1035,7 +1136,7 @@ async function loadResultsGrid() {
 
       return `<tr id="ms-row-${p.id}" style="background:${i%2===0?'white':'#fafafa'}">
         <td style="padding:6px 10px;border:1px solid #e5e7eb;text-align:center;color:#9ca3af;font-size:12px">${i+1}</td>
-        <td style="padding:6px 10px;border:1px solid #e5e7eb;white-space:nowrap;font-weight:600;font-size:13px;min-width:140px">${p.last_name}, ${p.first_name}</td>
+        <td style="padding:6px 10px;border:1px solid #e5e7eb;white-space:nowrap;font-weight:600;font-size:13px;min-width:140px">${esc(p.last_name)}, ${esc(p.first_name)}</td>
         ${cells}
         <td id="ms-total-${p.id}" style="padding:6px 10px;border:1px solid #e5e7eb;text-align:center;font-weight:700;font-size:14px;color:#7B1D1D;background:#fff5f5;white-space:nowrap">${gtDisplay}</td>
         <td style="padding:4px;border:1px solid #e5e7eb">
@@ -1198,9 +1299,9 @@ async function loadArchive(status) {
           <tr>
             <td>
               <div class="pupil-info">
-                <div class="pupil-avatar">${p.first_name.charAt(0)}${p.last_name.charAt(0)}</div>
+                <div class="pupil-avatar">${esc(p.first_name).charAt(0)}${esc(p.last_name).charAt(0)}</div>
                 <div>
-                  <div class="pupil-name">${p.last_name}, ${p.first_name}</div>
+                  <div class="pupil-name">${esc(p.last_name)}, ${esc(p.first_name)}</div>
                 </div>
               </div>
             </td>
@@ -1264,6 +1365,7 @@ async function loadSettings() {
     if (currentUser.role === 'admin') {
       loadParentAccountsList();
       loadNoticesAdminList();
+      loadAuditLog();
     }
   } catch (err) {
     showToast('Error loading settings: ' + err.message, 'error');
@@ -1373,6 +1475,7 @@ async function changePassword(e) {
   const pw = document.getElementById('new-password').value;
   const confirm = document.getElementById('confirm-password').value;
   if (pw !== confirm) return showToast('Passwords do not match', 'error');
+  if (pw.length < 6) return showToast('Password must be at least 6 characters', 'error');
   try {
     await apiFetch(`/api/teachers/${currentUser.id}`, {
       method: 'PUT',
@@ -2077,8 +2180,8 @@ async function loadClassBills() {
       </tr></thead><tbody>`;
     pupils.forEach(p => {
       html += `<tr>
-        <td><strong>${p.last_name}, ${p.first_name}</strong></td>
-        <td>${p.admission_number || '—'}</td>
+        <td><strong>${esc(p.last_name)}, ${esc(p.first_name)}</strong></td>
+        <td>${esc(p.admission_number || '—')}</td>
         <td>
           <button class="btn btn-sm btn-primary" onclick="printBillForPupil('${p.id}','${termId}')">🖨️ Print Bill</button>
           <button class="btn btn-sm btn-secondary" onclick="recordFeePayment('${p.id}','${termId}')">💰 Record Payment</button>
@@ -2528,6 +2631,192 @@ async function exportParents() {
   }
 }
 
+// ─── CSV EXPORTS ──────────────────────────────────────────────────────────────
+
+async function exportPupilsCSV() {
+  try {
+    const token = localStorage.getItem('token');
+    const res = await fetch('/api/export/pupils', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!res.ok) { showToast('Export failed', 'error'); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'pupils.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) { showToast('Export failed: ' + err.message, 'error'); }
+}
+
+async function exportResultsCSV() {
+  const termId = document.getElementById('results-term-select')?.value;
+  if (!termId) { showToast('Please select a term first', 'error'); return; }
+  try {
+    const token = localStorage.getItem('token');
+    const res = await fetch(`/api/export/results?term_id=${termId}`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!res.ok) { showToast('Export failed', 'error'); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'results.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) { showToast('Export failed: ' + err.message, 'error'); }
+}
+
+async function exportFeesCSV() {
+  const termSelect = document.getElementById('bill-term-select');
+  const termId = termSelect ? termSelect.value : (appData.terms.find(t => t.is_current) || appData.terms[0])?.id;
+  if (!termId) { showToast('Please select a term first', 'error'); return; }
+  try {
+    const token = localStorage.getItem('token');
+    const res = await fetch(`/api/export/fees?term_id=${termId}`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!res.ok) { showToast('Export failed', 'error'); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'fees.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) { showToast('Export failed: ' + err.message, 'error'); }
+}
+
+// ─── BULK RESULTS IMPORT ──────────────────────────────────────────────────────
+
+function showBulkResultsImport() {
+  const { classId, termId, subjects } = window._marksheetData || {};
+  if (!classId || !termId) {
+    showToast('Please load a marksheet first (select class and term)', 'error');
+    return;
+  }
+  openModal('📥 Import Results CSV', `
+    <div>
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:8px">
+        Upload a CSV file to pre-fill scores. The file must have these columns:<br/>
+        <code style="background:var(--gray-50);padding:2px 6px;border-radius:4px">admission_number, subject_name, ca_score, exam_score</code>
+      </p>
+      <div class="form-group">
+        <label>Select CSV File</label>
+        <input type="file" id="import-csv-input" accept=".csv" onchange="previewImportCSV(event)" />
+      </div>
+      <div id="import-csv-preview"></div>
+      <div id="import-csv-actions" class="hidden" style="margin-top:12px;display:flex;gap:8px">
+        <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="applyImportedResults()">✅ Apply to Marksheet</button>
+      </div>
+    </div>`);
+}
+
+let _importedRows = [];
+
+function previewImportCSV(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const text = e.target.result;
+    const lines = text.split(/\r?\n/).filter(l => l.trim());
+    if (lines.length < 2) {
+      document.getElementById('import-csv-preview').innerHTML = '<div class="empty">File appears empty or has no data rows.</div>';
+      return;
+    }
+    const headers = lines[0].split(',').map(h => h.replace(/^"|"$/g,'').trim().toLowerCase());
+    const admIdx = headers.indexOf('admission_number');
+    const subjIdx = headers.indexOf('subject_name');
+    const caIdx = headers.indexOf('ca_score');
+    const examIdx = headers.indexOf('exam_score');
+    if (admIdx < 0 || subjIdx < 0 || caIdx < 0 || examIdx < 0) {
+      document.getElementById('import-csv-preview').innerHTML =
+        '<div class="empty" style="color:#dc2626">Missing required columns. Need: admission_number, subject_name, ca_score, exam_score</div>';
+      return;
+    }
+    const { pupils, subjects } = window._marksheetData || {};
+    _importedRows = [];
+    const rows = lines.slice(1).map(line => {
+      const cols = line.split(',').map(c => c.replace(/^"|"$/g,'').trim());
+      const admNo = cols[admIdx];
+      const subjName = cols[subjIdx];
+      const ca = parseFloat(cols[caIdx]) || 0;
+      const exam = parseFloat(cols[examIdx]) || 0;
+      const pupil = (pupils||[]).find(p => p.admission_number === admNo);
+      const subject = (subjects||[]).find(s => s.name.toLowerCase() === subjName.toLowerCase());
+      const status = !pupil ? 'Unknown pupil' : !subject ? 'Unknown subject' : 'OK';
+      if (pupil && subject) _importedRows.push({ pupil, subject, ca, exam });
+      return { admNo, subjName, ca, exam, status };
+    });
+    const preview = rows.map(r => `<tr>
+      <td style="padding:4px 8px;font-size:12px">${esc(r.admNo)}</td>
+      <td style="padding:4px 8px;font-size:12px">${esc(r.subjName)}</td>
+      <td style="padding:4px 8px;font-size:12px;text-align:center">${r.ca}</td>
+      <td style="padding:4px 8px;font-size:12px;text-align:center">${r.exam}</td>
+      <td style="padding:4px 8px;font-size:12px;color:${r.status==='OK'?'#15803d':'#dc2626'}">${esc(r.status)}</td>
+    </tr>`).join('');
+    document.getElementById('import-csv-preview').innerHTML = `
+      <div style="max-height:300px;overflow-y:auto;margin-top:10px">
+        <table class="data-table" style="font-size:12px">
+          <thead><tr>
+            <th>Adm No</th><th>Subject</th><th>CA</th><th>Exam</th><th>Status</th>
+          </tr></thead>
+          <tbody>${preview}</tbody>
+        </table>
+      </div>
+      <div style="margin-top:8px;font-size:12px;color:var(--gray-500)">${_importedRows.length} of ${rows.length} rows will be applied.</div>`;
+    document.getElementById('import-csv-actions').classList.remove('hidden');
+  };
+  reader.readAsText(file);
+}
+
+function applyImportedResults() {
+  if (!_importedRows.length) { showToast('No valid rows to apply', 'error'); return; }
+  let applied = 0;
+  _importedRows.forEach(({ pupil, subject, ca, exam }) => {
+    const caEl = document.getElementById(`ms-ca-${pupil.id}-${subject.id}`);
+    const examEl = document.getElementById(`ms-exam-${pupil.id}-${subject.id}`);
+    if (caEl) { caEl.value = Math.min(ca, 40); }
+    if (examEl) { examEl.value = Math.min(exam, 60); }
+    if (caEl || examEl) { msRecomputeTotal(pupil.id); applied++; }
+  });
+  closeModal();
+  showToast(`Applied ${applied} scores to marksheet. Review and save.`, 'success');
+}
+
+// ─── AUDIT LOG ────────────────────────────────────────────────────────────────
+
+async function loadAuditLog() {
+  const el = document.getElementById('audit-log-list');
+  if (!el) return;
+  try {
+    const logs = await apiFetch('/api/audit-log');
+    if (!logs.length) {
+      el.innerHTML = '<div class="empty" style="font-size:12px;padding:8px">No audit entries yet.</div>';
+      return;
+    }
+    el.innerHTML = `<div style="overflow-x:auto;max-height:300px;overflow-y:auto">
+      <table class="data-table" style="font-size:11px">
+        <thead><tr>
+          <th>Date/Time</th><th>User</th><th>Action</th><th>Details</th>
+        </tr></thead>
+        <tbody>${logs.map(l => `<tr>
+          <td style="white-space:nowrap">${new Date(l.created_at).toLocaleString('en-GB',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</td>
+          <td>${esc(l.user_email || '—')}</td>
+          <td><span class="badge" style="background:#f3f4f6;color:#374151">${esc(l.action)}</span></td>
+          <td style="color:var(--gray-500)">${esc(l.details || l.target_id || '—')}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>`;
+  } catch (err) {
+    el.innerHTML = `<div class="empty" style="font-size:12px">Error: ${esc(err.message)}</div>`;
+  }
+}
+
 // ─── MODAL ────────────────────────────────────────────────────────────────────
 
 function openModal(title, html) {
@@ -2571,9 +2860,9 @@ async function loadParentHome() {
           <div style="display:flex;gap:14px;align-items:center">
             ${photo}
             <div>
-              <div style="font-size:15px;font-weight:700;color:#1f2937;margin-bottom:4px">${name}</div>
-              <div style="font-size:12px;color:#6b7280;margin-bottom:6px">${c.class_name || 'No class assigned'}</div>
-              <div style="font-size:12px;color:#6b7280">Adm: <strong>${c.admission_number || '—'}</strong></div>
+              <div style="font-size:15px;font-weight:700;color:#1f2937;margin-bottom:4px">${esc(name)}</div>
+              <div style="font-size:12px;color:#6b7280;margin-bottom:6px">${esc(c.class_name || 'No class assigned')}</div>
+              <div style="font-size:12px;color:#6b7280">Adm: <strong>${esc(c.admission_number || '—')}</strong></div>
               <div style="margin-top:8px">
                 <span class="badge badge-${c.gender}">${c.gender || '—'}</span>
                 ${c.class_type === 'lower' ? '<span class="badge" style="background:#fef9c3;color:#78350f;margin-left:4px">Nursery/KG</span>' : ''}
@@ -2665,7 +2954,7 @@ async function loadParentChildResults(term) {
       const grade = reportGrade(total);
       totalCA += ca; totalExam += exam; totalObtained += total;
       return `<tr>
-        <td style="padding:6px 10px;border-bottom:1px solid var(--gray-100)"><strong>${r.subject_name}</strong></td>
+        <td style="padding:6px 10px;border-bottom:1px solid var(--gray-100)"><strong>${esc(r.subject_name)}</strong></td>
         <td style="padding:6px 10px;border-bottom:1px solid var(--gray-100);text-align:center">${ca}<span style="color:var(--gray-400);font-size:11px">/40</span></td>
         <td style="padding:6px 10px;border-bottom:1px solid var(--gray-100);text-align:center">${exam}<span style="color:var(--gray-400);font-size:11px">/60</span></td>
         <td style="padding:6px 10px;border-bottom:1px solid var(--gray-100);text-align:center;font-weight:700">${total}</td>
@@ -2888,9 +3177,9 @@ async function loadParentNotices() {
       <div style="background:white;border:1px solid var(--gray-200);border-radius:8px;padding:16px 20px;margin-bottom:12px">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
           <div>
-            <div style="font-size:15px;font-weight:700;color:#1f2937">${n.title}</div>
+            <div style="font-size:15px;font-weight:700;color:#1f2937">${esc(n.title)}</div>
             <div style="font-size:12px;color:var(--gray-400);margin-top:2px">
-              Posted by ${n.posted_by} · ${new Date(n.posted_at).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}
+              Posted by ${esc(n.posted_by)} · ${new Date(n.posted_at).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}
               ${n.target === 'parents' ? '<span class="badge" style="margin-left:6px;background:#fef9c3;color:#78350f">Parents</span>' : ''}
             </div>
           </div>
@@ -2917,9 +3206,9 @@ async function loadParentAccountsList() {
     el.innerHTML = parents.map(p => `
       <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--gray-100)">
         <div>
-          <div style="font-size:13px;font-weight:600">${p.name}</div>
-          <div style="font-size:11px;color:var(--gray-400)">${p.email}</div>
-          <div style="font-size:11px;color:var(--gray-400)">${p.children.map(c=>c.first_name+' '+c.last_name).join(', ') || 'No linked children'}</div>
+          <div style="font-size:13px;font-weight:600">${esc(p.name)}</div>
+          <div style="font-size:11px;color:var(--gray-400)">${esc(p.email)}</div>
+          <div style="font-size:11px;color:var(--gray-400)">${p.children.map(c=>esc(c.first_name)+' '+esc(c.last_name)).join(', ') || 'No linked children'}</div>
         </div>
         <div style="display:flex;gap:6px;align-items:center">
           <span class="badge ${p.is_active ? 'badge-active' : ''}" style="${!p.is_active?'background:#fee2e2;color:#dc2626':''}">
@@ -3019,7 +3308,7 @@ async function loadNoticesAdminList() {
     el.innerHTML = notices.map(n => `
       <div style="display:flex;align-items:flex-start;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--gray-100);gap:10px">
         <div style="flex:1">
-          <div style="font-size:13px;font-weight:600">${n.title}</div>
+          <div style="font-size:13px;font-weight:600">${esc(n.title)}</div>
           <div style="font-size:11px;color:var(--gray-400)">
             ${new Date(n.posted_at).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})} ·
             ${n.target === 'parents' ? 'Parents only' : n.target === 'teachers' ? 'Staff only' : 'Everyone'}
@@ -3112,13 +3401,17 @@ async function deleteNotice(noticeId) {
 
 // ─── TOAST ────────────────────────────────────────────────────────────────────
 
-function showToast(message, type = 'success') {
+function showToast(message, type = 'success', duration) {
   const toast = document.getElementById('toast');
   toast.textContent = message;
   toast.className = `toast toast-${type}`;
   toast.classList.remove('hidden');
   clearTimeout(showToast._timer);
-  showToast._timer = setTimeout(() => toast.classList.add('hidden'), 3500);
+  // duration=0 means stay until dismissed; omitted/undefined = 3500ms default
+  const ms = duration === 0 ? null : (duration != null ? duration : 3500);
+  if (ms != null) {
+    showToast._timer = setTimeout(() => { toast.classList.add('hidden'); toast.onclick = null; }, ms);
+  }
 }
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────

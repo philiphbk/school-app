@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>School App</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/responsive.css">
+</head>
+<body>
+  <!-- Your HTML content here -->
+
+  <!-- ✅ CORRECT SCRIPT ORDER (most important!) -->
+  
+  <!-- 1. Utilities FIRST (needed by everything) -->
+  <script src="/static/js/utils.js"></script>
+  
+  <!-- 2. Core app setup -->
+  <script src="/static/js/app-core.js"></script>
+  
+  <!-- 3. Module-specific scripts -->
+  <script src="/static/js/modules/dashboard.js"></script>
+  <script src="/static/js/modules/pupils.js"></script>
+  <script src="/static/js/modules/teachers.js"></script>
+  <script src="/static/js/modules/classes.js"></script>
+  <script src="/static/js/modules/results.js"></script>
+  <script src="/static/js/modules/fees.js"></script>
+  <script src="/static/js/modules/payments.js"></script>
+  <script src="/static/js/modules/archive.js"></script>
+  <script src="/static/js/modules/settings.js"></script>
+  <script src="/static/js/modules/parent-portal.js"></script>
+  
+  <!-- 4. Optional integrations -->
+  <script src="/static/js/logger.js"></script>
+  <script src="/static/js/realtime.js"></script>
+  
+  <!-- 5. App initialization LAST -->
+  <script src="/static/js/init.js"></script>
+
+  <!-- 11. Test Suite (before init.js) -->
+  <script src="/static/js/test-suite.js"></script>
+</body>
+</html>

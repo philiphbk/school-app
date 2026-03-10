@@ -8,17 +8,38 @@ import http.server
 import json
 import sqlite3
 import hashlib
+import hmac
 import uuid
 import os
 import base64
 import re
 import mimetypes
+import threading
+import csv
+import io
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timedelta
 
 # Railway (and most cloud platforms) inject a PORT environment variable.
 # Fall back to 8080 for local development.
 PORT = int(os.environ.get("PORT", 8080))
+
+# CORS
+ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "*")
+
+# Email (SMTP) config
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASS = os.environ.get("SMTP_PASS", "")
+SMTP_FROM = os.environ.get("SMTP_FROM", "")
+
+# Login rate limiting
+_login_attempts = {}
+_login_lock = threading.Lock()
 
 # On Railway, mount a persistent volume at /data and set DATA_DIR=/data
 # so the database and uploads survive redeploys. Falls back to the app
@@ -40,6 +61,24 @@ def get_db():
 def init_db():
     conn = get_db()
     c = conn.cursor()
+
+    # Schema compatibility check: drop any table still using the old INTEGER PK schema
+    # so they can be recreated correctly. All such tables are empty in legacy deployments.
+    _old_schema_tables = ["users", "parent_accounts"]
+    try:
+        for tbl in _old_schema_tables:
+            cols = {row[1]: row[2] for row in c.execute(f"PRAGMA table_info({tbl})").fetchall()}
+            # Old schema: INTEGER primary key OR missing expected TEXT columns
+            if cols.get("id") == "INTEGER" or (tbl == "parent_accounts" and "email" not in cols):
+                stale = ["users", "classes", "pupils", "results", "parent_accounts",
+                         "teachers", "conduct", "payments", "fees", "audit_log"]
+                for t in stale:
+                    c.execute(f"DROP TABLE IF EXISTS {t}")
+                conn.commit()
+                break
+    except Exception:
+        pass
+
     c.executescript("""
     CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
@@ -212,9 +251,29 @@ def init_db():
         updated_at TEXT DEFAULT (datetime('now')),
         UNIQUE(pupil_id, term_id, skill_name)
     );
+
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        user_email TEXT,
+        action TEXT NOT NULL,
+        target_type TEXT,
+        target_id TEXT,
+        details TEXT,
+        ip_address TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
     """)
 
     # Migrations
+    # If a previous reworked schema created users.full_name instead of users.name, rename it
+    try:
+        cols = [row[1] for row in c.execute("PRAGMA table_info(users)").fetchall()]
+        if 'full_name' in cols and 'name' not in cols:
+            c.execute("ALTER TABLE users RENAME COLUMN full_name TO name")
+            conn.commit()
+    except: pass
+
     try:
         c.execute("ALTER TABLE classes ADD COLUMN class_type TEXT DEFAULT 'primary'")
         conn.commit()
@@ -235,14 +294,32 @@ def init_db():
         conn.commit()
     except: pass
 
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
+
+    try:
+        c.execute("ALTER TABLE parent_accounts ADD COLUMN must_change_password INTEGER DEFAULT 0")
+        conn.commit()
+    except: pass
+
+    # Flag any existing admin still using the legacy default password as needing a change
+    try:
+        _legacy_default = hashlib.sha256("admin123".encode()).hexdigest()
+        c.execute("""UPDATE users SET must_change_password=1
+                     WHERE role='admin' AND password_hash=?""", (_legacy_default,))
+        conn.commit()
+    except: pass
+
     # Seed default admin if none exists
     admin = c.execute("SELECT id FROM users WHERE role='admin'").fetchone()
     if not admin:
         admin_id = str(uuid.uuid4())
-        pw_hash = hashlib.sha256("admin123".encode()).hexdigest()
-        c.execute("""INSERT INTO users (id, name, email, password_hash, role)
-                     VALUES (?, ?, ?, ?, ?)""",
-                  (admin_id, "School Admin", "admin@school.com", pw_hash, "admin"))
+        pw_hash = hash_password("admin123")
+        c.execute("""INSERT INTO users (id, name, email, password_hash, role, must_change_password)
+                     VALUES (?, ?, ?, ?, ?, ?)""",
+                  (admin_id, "School Admin", "admin@school.com", pw_hash, "admin", 1))
 
     # Seed default classes
     existing_classes = c.execute("SELECT COUNT(*) FROM classes").fetchone()[0]
@@ -292,7 +369,106 @@ def init_db():
 # ─── AUTH HELPERS ─────────────────────────────────────────────────────────────
 
 def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Hash using PBKDF2-HMAC-SHA256 with a random salt. Returns pbkdf2$<salt_hex>$<hash_hex>."""
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 260000)
+    return f"pbkdf2${salt.hex()}${dk.hex()}"
+
+def check_password(password, stored_hash):
+    """Check password against stored hash. Supports legacy SHA-256 (64-char hex) and new PBKDF2."""
+    if not stored_hash:
+        return False
+    if stored_hash.startswith("pbkdf2$"):
+        try:
+            _, salt_hex, hash_hex = stored_hash.split("$")
+            salt = bytes.fromhex(salt_hex)
+            dk = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 260000)
+            return hmac.compare_digest(dk.hex(), hash_hex)
+        except Exception:
+            return False
+    else:
+        # Legacy SHA-256 format (64-char hex)
+        legacy = hashlib.sha256(password.encode()).hexdigest()
+        return hmac.compare_digest(legacy, stored_hash)
+
+def get_client_ip(handler):
+    forwarded = handler.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return handler.client_address[0]
+
+def check_rate_limit(ip):
+    """Returns (allowed: bool, wait_secs: int)."""
+    with _login_lock:
+        record = _login_attempts.get(ip)
+        if not record:
+            return True, 0
+        if record.get("locked_until"):
+            remaining = int(record["locked_until"] - datetime.now().timestamp())
+            if remaining > 0:
+                return False, remaining
+            else:
+                del _login_attempts[ip]
+        return True, 0
+
+def record_failed_attempt(ip):
+    with _login_lock:
+        record = _login_attempts.setdefault(ip, {"count": 0})
+        record["count"] = record.get("count", 0) + 1
+        if record["count"] >= 5:
+            record["locked_until"] = datetime.now().timestamp() + 600
+
+def clear_attempts(ip):
+    with _login_lock:
+        _login_attempts.pop(ip, None)
+
+def cleanup_expired_sessions():
+    try:
+        conn = get_db()
+        conn.execute("DELETE FROM sessions WHERE expires_at <= datetime('now')")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def write_audit(user, action, target_type=None, target_id=None, details=None, ip=None):
+    try:
+        conn = get_db()
+        uid = user["id"] if user else None
+        uemail = user["email"] if user else None
+        conn.execute("""INSERT INTO audit_log (id, user_id, user_email, action, target_type, target_id, details, ip_address)
+                        VALUES (?,?,?,?,?,?,?,?)""",
+                     (str(uuid.uuid4()), uid, uemail, action, target_type, target_id, details, ip))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def send_email_async(to_addr, subject, html_body):
+    if not (SMTP_HOST and SMTP_USER):
+        return
+    def _send():
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = SMTP_FROM or SMTP_USER
+            msg["To"] = to_addr
+            msg.attach(MIMEText(html_body, "html"))
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                server.starttls()
+                server.login(SMTP_USER, SMTP_PASS)
+                server.sendmail(SMTP_FROM or SMTP_USER, to_addr, msg.as_string())
+        except Exception as e:
+            print(f"Email send error: {e}")
+    t = threading.Thread(target=_send, daemon=True)
+    t.start()
+
+def add_security_headers(handler):
+    handler.send_header("X-Frame-Options", "SAMEORIGIN")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("X-XSS-Protection", "1; mode=block")
+    handler.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+    handler.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
 
 def create_session(user_id, user_type="staff"):
     token = str(uuid.uuid4())
@@ -337,7 +513,7 @@ def send_json(handler, data, status=200):
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Access-Control-Allow-Origin", "*")
+    add_security_headers(handler)
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -361,19 +537,51 @@ def handle_login(handler, body):
     password = body.get("password", "")
     if not email or not password:
         return send_error(handler, "Email and password required")
+
+    ip = get_client_ip(handler)
+    allowed, wait_secs = check_rate_limit(ip)
+    if not allowed:
+        return send_error(handler, f"Too many failed attempts. Try again in {wait_secs} seconds.", 429)
+
     conn = get_db()
     # Try staff first
     user = conn.execute("SELECT * FROM users WHERE email = ? AND is_active = 1", (email,)).fetchone()
-    if user and user["password_hash"] == hash_password(password):
+    if user and check_password(password, user["password_hash"]):
+        # Transparently upgrade old SHA-256 hash to PBKDF2
+        if not user["password_hash"].startswith("pbkdf2$"):
+            new_hash = hash_password(password)
+            conn.execute("UPDATE users SET password_hash=? WHERE id=?", (new_hash, user["id"]))
+            conn.commit()
         conn.close()
+        clear_attempts(ip)
+        cleanup_expired_sessions()
         token = create_session(user["id"], "staff")
-        return send_json(handler, {"token": token, "user": {"id": user["id"], "name": user["name"], "email": user["email"], "role": user["role"]}})
+        write_audit(dict(user), "login", ip=ip)
+        must_change = bool(user["must_change_password"]) if "must_change_password" in user.keys() else False
+        return send_json(handler, {"token": token, "user": {
+            "id": user["id"], "name": user["name"], "email": user["email"],
+            "role": user["role"], "must_change_password": must_change
+        }})
     # Try parent
     parent = conn.execute("SELECT * FROM parent_accounts WHERE email = ? AND is_active = 1", (email,)).fetchone()
-    conn.close()
-    if parent and parent["password_hash"] == hash_password(password):
+    if parent and check_password(password, parent["password_hash"]):
+        # Transparently upgrade old SHA-256 hash to PBKDF2
+        if not parent["password_hash"].startswith("pbkdf2$"):
+            new_hash = hash_password(password)
+            conn.execute("UPDATE parent_accounts SET password_hash=? WHERE id=?", (new_hash, parent["id"]))
+            conn.commit()
+        conn.close()
+        clear_attempts(ip)
+        cleanup_expired_sessions()
         token = create_session(parent["id"], "parent")
-        return send_json(handler, {"token": token, "user": {"id": parent["id"], "name": parent["name"], "email": parent["email"], "role": "parent"}})
+        write_audit(dict(parent), "login", ip=ip)
+        must_change = bool(parent["must_change_password"]) if "must_change_password" in parent.keys() else False
+        return send_json(handler, {"token": token, "user": {
+            "id": parent["id"], "name": parent["name"], "email": parent["email"],
+            "role": "parent", "must_change_password": must_change
+        }})
+    conn.close()
+    record_failed_attempt(ip)
     return send_error(handler, "Invalid email or password", 401)
 
 def handle_logout(handler, user):
@@ -382,6 +590,7 @@ def handle_logout(handler, user):
     conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
     conn.commit()
     conn.close()
+    write_audit(user, "logout", ip=get_client_ip(handler))
     send_json(handler, {"message": "Logged out"})
 
 def handle_get_me(handler, user):
@@ -396,6 +605,8 @@ def handle_get_me(handler, user):
 # ── PUPILS ────────────────────────────────────────────────────────────────────
 
 def handle_get_pupils(handler, user, params):
+    if user["role"] == "parent":
+        return send_error(handler, "Forbidden", 403)
     class_id = params.get("class_id", [None])[0]
     status = params.get("status", ["active"])[0]
     search = params.get("search", [None])[0]
@@ -441,6 +652,9 @@ def handle_create_pupil(handler, user, body):
         if not body.get(f):
             return send_error(handler, f"{f} is required")
 
+    if body.get("photo") and len(body["photo"]) > 2_000_000:
+        return send_error(handler, "Photo must be under 1.5MB")
+
     pid = str(uuid.uuid4())
     conn = get_db()
     count = conn.execute("SELECT COUNT(*) FROM pupils").fetchone()[0]
@@ -476,6 +690,8 @@ def handle_create_pupil(handler, user, body):
     conn.commit()
     pupil = conn.execute("SELECT * FROM pupils WHERE id = ?", (pid,)).fetchone()
     conn.close()
+    write_audit(user, "create_pupil", target_type="pupil", target_id=pid,
+                details=f"{body.get('first_name','')} {body.get('last_name','')}", ip=get_client_ip(handler))
     send_json(handler, dict(pupil), 201)
 
 def handle_get_pupil(handler, user, pupil_id):
@@ -491,6 +707,10 @@ def handle_get_pupil(handler, user, pupil_id):
     send_json(handler, dict(pupil))
 
 def handle_update_pupil(handler, user, pupil_id, body):
+    if user["role"] not in ("admin", "teacher"):
+        return send_error(handler, "Not authorized", 403)
+    if body.get("photo") and len(body["photo"]) > 2_000_000:
+        return send_error(handler, "Photo must be under 1.5MB")
     conn = get_db()
     pupil = conn.execute("SELECT id FROM pupils WHERE id = ?", (pupil_id,)).fetchone()
     if not pupil:
@@ -518,6 +738,7 @@ def handle_update_pupil(handler, user, pupil_id, body):
     conn.commit()
     updated = conn.execute("SELECT * FROM pupils WHERE id = ?", (pupil_id,)).fetchone()
     conn.close()
+    write_audit(user, "update_pupil", target_type="pupil", target_id=pupil_id, ip=get_client_ip(handler))
     send_json(handler, dict(updated))
 
 def handle_archive_pupil(handler, user, pupil_id):
@@ -527,6 +748,7 @@ def handle_archive_pupil(handler, user, pupil_id):
     conn.execute("UPDATE pupils SET status='archived', updated_at=datetime('now') WHERE id=?", (pupil_id,))
     conn.commit()
     conn.close()
+    write_audit(user, "archive_pupil", target_type="pupil", target_id=pupil_id, ip=get_client_ip(handler))
     send_json(handler, {"message": "Pupil archived"})
 
 def handle_restore_pupil(handler, user, pupil_id):
@@ -547,7 +769,10 @@ def handle_promote_class(handler, user, class_id):
         conn.close()
         return send_error(handler, "Class not found", 404)
     level = cls["level"]
-    if level >= 6:
+    class_type = cls["class_type"] or "primary"
+
+    # Primary 6 graduates
+    if class_type == "primary" and level >= 6:
         conn.execute("""UPDATE pupils SET status='graduated', class_id=NULL, updated_at=datetime('now')
                         WHERE class_id=? AND status='active'""", (class_id,))
         count = conn.execute("SELECT changes()").fetchone()[0]
@@ -555,7 +780,25 @@ def handle_promote_class(handler, user, class_id):
         conn.close()
         return send_json(handler, {"message": f"{count} pupils graduated from Primary 6"})
 
-    next_cls = conn.execute("SELECT * FROM classes WHERE level=?", (level+1,)).fetchone()
+    # Lower-school top class (Nursery 2, level 3) promotes to Primary 1
+    if class_type == "lower" and level >= 3:
+        next_cls = conn.execute(
+            "SELECT * FROM classes WHERE class_type='primary' AND level=1"
+        ).fetchone()
+        if not next_cls:
+            conn.close()
+            return send_error(handler, "Primary 1 class not found")
+        conn.execute("""UPDATE pupils SET class_id=?, updated_at=datetime('now')
+                        WHERE class_id=? AND status='active'""", (next_cls["id"], class_id))
+        count = conn.execute("SELECT changes()").fetchone()[0]
+        conn.commit()
+        conn.close()
+        return send_json(handler, {"message": f"{count} pupils promoted to {next_cls['name']}", "count": count})
+
+    # Within the same class_type, find the next level
+    next_cls = conn.execute(
+        "SELECT * FROM classes WHERE class_type=? AND level=?", (class_type, level + 1)
+    ).fetchone()
     if not next_cls:
         conn.close()
         return send_error(handler, "Next class not found")
@@ -570,6 +813,8 @@ def handle_promote_class(handler, user, class_id):
 # ── TEACHERS ──────────────────────────────────────────────────────────────────
 
 def handle_get_teachers(handler, user):
+    if user["role"] == "parent":
+        return send_error(handler, "Forbidden", 403)
     conn = get_db()
     rows = conn.execute("""
         SELECT u.*, c.name as class_name, c.id as class_id
@@ -588,6 +833,8 @@ def handle_create_teacher(handler, user, body):
     for f in required:
         if not body.get(f):
             return send_error(handler, f"{f} is required")
+    if len(body["password"]) < 6:
+        return send_error(handler, "Password must be at least 6 characters")
     conn = get_db()
     existing = conn.execute("SELECT id FROM users WHERE email=?", (body["email"].lower(),)).fetchone()
     if existing:
@@ -603,6 +850,8 @@ def handle_create_teacher(handler, user, body):
     conn.commit()
     teacher = conn.execute("SELECT id,name,email,role,phone FROM users WHERE id=?", (tid,)).fetchone()
     conn.close()
+    write_audit(user, "create_teacher", target_type="teacher", target_id=tid,
+                details=body["name"], ip=get_client_ip(handler))
     send_json(handler, dict(teacher), 201)
 
 def handle_update_teacher(handler, user, teacher_id, body):
@@ -619,6 +868,9 @@ def handle_update_teacher(handler, user, teacher_id, body):
                 updates.append(f"{f} = ?")
                 values.append(body[f])
     if body.get("password"):
+        if len(body["password"]) < 6:
+            conn.close()
+            return send_error(handler, "Password must be at least 6 characters")
         updates.append("password_hash = ?")
         values.append(hash_password(body["password"]))
     if updates:
@@ -640,6 +892,7 @@ def handle_delete_teacher(handler, user, teacher_id):
     conn.execute("UPDATE classes SET teacher_id=NULL WHERE teacher_id=?", (teacher_id,))
     conn.commit()
     conn.close()
+    write_audit(user, "delete_teacher", target_type="teacher", target_id=teacher_id, ip=get_client_ip(handler))
     send_json(handler, {"message": "Teacher removed"})
 
 # ── CLASSES ───────────────────────────────────────────────────────────────────
@@ -709,16 +962,25 @@ def handle_get_terms(handler):
 def handle_create_term(handler, user, body):
     if user["role"] != "admin":
         return send_error(handler, "Not authorized", 403)
+    academic_year = body.get("academic_year", "").strip()
+    if not academic_year:
+        return send_error(handler, "academic_year is required")
+    try:
+        term_number = int(body.get("term_number"))
+        if term_number not in (1, 2, 3):
+            raise ValueError()
+    except (TypeError, ValueError):
+        return send_error(handler, "term_number must be 1, 2, or 3")
     conn = get_db()
     existing = conn.execute("SELECT id FROM terms WHERE academic_year=? AND term_number=?",
-                            (body.get("academic_year"), body.get("term_number"))).fetchone()
+                            (academic_year, term_number)).fetchone()
     if existing:
         conn.close()
         return send_error(handler, "Term already exists")
     tid = str(uuid.uuid4())
     conn.execute("""INSERT INTO terms (id, academic_year, term_number, start_date, end_date)
                     VALUES (?,?,?,?,?)""",
-                 (tid, body.get("academic_year"), body.get("term_number"),
+                 (tid, academic_year, term_number,
                   body.get("start_date",""), body.get("end_date","")))
     conn.commit()
     conn.close()
@@ -737,6 +999,8 @@ def handle_set_current_term(handler, user, term_id):
 # ── RESULTS ───────────────────────────────────────────────────────────────────
 
 def handle_get_results(handler, user, params):
+    if user["role"] == "parent":
+        return send_error(handler, "Forbidden", 403)
     pupil_id = params.get("pupil_id", [None])[0]
     term_id = params.get("term_id", [None])[0]
     class_id = params.get("class_id", [None])[0]
@@ -774,33 +1038,60 @@ def handle_get_results(handler, user, params):
     send_json(handler, [dict(r) for r in rows])
 
 def handle_save_results_batch(handler, user, body):
+    if user["role"] not in ("admin", "teacher"):
+        return send_error(handler, "Not authorized", 403)
     results = body.get("results", [])
     if not results:
         return send_error(handler, "No results provided")
     conn = get_db()
-    for r in results:
-        existing = conn.execute(
-            "SELECT id FROM results WHERE pupil_id=? AND subject_id=? AND term_id=?",
-            (r["pupil_id"], r["subject_id"], r["term_id"])
-        ).fetchone()
-        ca = min(float(r.get("ca_score", 0)), 40)
-        exam = min(float(r.get("exam_score", 0)), 60)
-        if existing:
-            conn.execute("""UPDATE results SET ca_score=?, exam_score=?, entered_by=?,
-                            updated_at=datetime('now') WHERE id=?""",
-                         (ca, exam, user["id"], existing["id"]))
-        else:
-            rid = str(uuid.uuid4())
-            conn.execute("""INSERT INTO results (id, pupil_id, subject_id, term_id, ca_score, exam_score, entered_by)
-                            VALUES (?,?,?,?,?,?,?)""",
-                         (rid, r["pupil_id"], r["subject_id"], r["term_id"], ca, exam, user["id"]))
-    conn.commit()
-    conn.close()
-    send_json(handler, {"message": f"Saved {len(results)} results"})
+    # Teachers may only enter results for pupils in their assigned class
+    if user["role"] == "teacher":
+        cls = conn.execute("SELECT id FROM classes WHERE teacher_id=?", (user["id"],)).fetchone()
+        if not cls:
+            conn.close()
+            return send_error(handler, "You are not assigned to any class", 403)
+        teacher_class_id = cls["id"]
+        class_pupil_ids = {
+            row["id"] for row in conn.execute(
+                "SELECT id FROM pupils WHERE class_id=? AND status='active'", (teacher_class_id,)
+            ).fetchall()
+        }
+        for r in results:
+            if r.get("pupil_id") not in class_pupil_ids:
+                conn.close()
+                return send_error(handler, "You can only enter results for pupils in your own class", 403)
+    try:
+        for r in results:
+            existing = conn.execute(
+                "SELECT id FROM results WHERE pupil_id=? AND subject_id=? AND term_id=?",
+                (r["pupil_id"], r["subject_id"], r["term_id"])
+            ).fetchone()
+            ca = min(float(r.get("ca_score", 0)), 40)
+            exam = min(float(r.get("exam_score", 0)), 60)
+            if existing:
+                conn.execute("""UPDATE results SET ca_score=?, exam_score=?, entered_by=?,
+                                updated_at=datetime('now') WHERE id=?""",
+                             (ca, exam, user["id"], existing["id"]))
+            else:
+                rid = str(uuid.uuid4())
+                conn.execute("""INSERT INTO results (id, pupil_id, subject_id, term_id, ca_score, exam_score, entered_by)
+                                VALUES (?,?,?,?,?,?,?)""",
+                             (rid, r["pupil_id"], r["subject_id"], r["term_id"], ca, exam, user["id"]))
+        conn.commit()
+        conn.close()
+        write_audit(user, "save_results", details=f"Saved {len(results)} results", ip=get_client_ip(handler))
+        send_json(handler, {"message": f"Saved {len(results)} results"})
+    except Exception as e:
+        try: conn.rollback()
+        except: pass
+        conn.close()
+        send_error(handler, f"Failed to save: {str(e)}", 500)
 
 # ── STATS ─────────────────────────────────────────────────────────────────────
 
 def handle_get_stats(handler, user):
+    if user["role"] == "parent":
+        return send_error(handler, "Forbidden", 403)
     conn = get_db()
     total_pupils = conn.execute("SELECT COUNT(*) FROM pupils WHERE status='active'").fetchone()[0]
     total_teachers = conn.execute("SELECT COUNT(*) FROM users WHERE role='teacher' AND is_active=1").fetchone()[0]
@@ -1112,7 +1403,25 @@ def handle_save_fee_payment(handler, user, body):
          amount, body.get('payment_date', ''),
          body.get('payment_reference', ''), body.get('notes', ''), user['id'], is_parent))
     conn.commit()
+    # Send email to parent if staff recorded the payment and parent email is available
+    if not is_parent:
+        pupil_row = conn.execute("SELECT first_name, last_name, parent_email FROM pupils WHERE id=?",
+                                 (body['pupil_id'],)).fetchone()
+        if pupil_row and pupil_row["parent_email"]:
+            app_url = os.environ.get("APP_URL", "")
+            html = f"""<html><body>
+<p>Dear Parent/Guardian,</p>
+<p>A fee payment of <strong>₦{amount:,.2f}</strong> has been recorded for <strong>{pupil_row['first_name']} {pupil_row['last_name']}</strong>.</p>
+<p>Payment Date: {body.get('payment_date', 'N/A')}<br/>
+Reference: {body.get('payment_reference', 'N/A')}</p>
+<p>You can view the full fee details on the <a href="{app_url}">GISL Schools Parent Portal</a>.</p>
+<p>Thank you.<br/>GISL Schools</p>
+</body></html>"""
+            send_email_async(pupil_row["parent_email"],
+                             "Fee Payment Recorded — GISL Schools", html)
     conn.close()
+    write_audit(user, "fee_payment", target_type="pupil", target_id=body['pupil_id'],
+                details=f"₦{amount}", ip=get_client_ip(handler))
     send_json(handler, {"message": "Payment recorded", "amount": amount})
 
 def handle_get_fee_payments_by_pupil(handler, user, pupil_id):
@@ -1151,6 +1460,8 @@ def handle_get_skill_assessments(handler, user, pupil_id, term_id):
     send_json(handler, result)
 
 def handle_save_skill_assessments(handler, user, pupil_id, term_id, body):
+    if user["role"] not in ("admin", "teacher"):
+        return send_error(handler, "Not authorized", 403)
     conn = get_db()
     skills = {k: v for k, v in body.items() if not k.startswith('__')}
     for skill_name, grade in skills.items():
@@ -1260,6 +1571,9 @@ def handle_save_parent_account(handler, user, body, parent_id=None):
                 updates.append(f"{f}=?")
                 values.append(body[f])
         if "password" in body and body["password"]:
+            if len(body["password"]) < 6:
+                conn.close()
+                return send_error(handler, "Password must be at least 6 characters")
             updates.append("password_hash=?")
             values.append(hash_password(body["password"]))
         if updates:
@@ -1275,12 +1589,30 @@ def handle_save_parent_account(handler, user, body, parent_id=None):
         if not email or not name or not password:
             conn.close()
             return send_error(handler, "Name, email and password required")
+        if len(password) < 6:
+            conn.close()
+            return send_error(handler, "Password must be at least 6 characters")
         pid = str(uuid.uuid4())
         try:
             conn.execute("INSERT INTO parent_accounts (id,name,email,password_hash,phone) VALUES (?,?,?,?,?)",
                 (pid, name, email, hash_password(password), body.get("phone","")))
             conn.commit()
             conn.close()
+            write_audit(user, "create_parent_account", target_type="parent_account", target_id=pid,
+                        details=email, ip=get_client_ip(handler))
+            # Send welcome email with credentials
+            app_url = os.environ.get("APP_URL", "")
+            html = f"""<html><body>
+<p>Dear {name},</p>
+<p>Your parent portal account has been created for <strong>GISL Daycare Nursery &amp; Primary School</strong>.</p>
+<p><strong>Login Details:</strong><br/>
+Email: {email}<br/>
+Password: {password}</p>
+<p>Access the portal at: <a href="{app_url}">{app_url or 'Contact school for URL'}</a></p>
+<p>Please change your password after first login.<br/>
+Thank you.<br/>GISL Schools</p>
+</body></html>"""
+            send_email_async(email, "Your GISL Schools Parent Portal Access", html)
             send_json(handler, {"id": pid, "message": "Created"})
         except Exception as e:
             conn.close()
@@ -1290,6 +1622,7 @@ def handle_delete_parent_account(handler, user, parent_id):
     if user["role"] not in ("admin",):
         return send_error(handler, "Forbidden", 403)
     conn = get_db()
+    conn.execute("DELETE FROM sessions WHERE user_id=?", (parent_id,))
     conn.execute("DELETE FROM parent_accounts WHERE id=?", (parent_id,))
     conn.commit()
     conn.close()
@@ -1448,6 +1781,166 @@ def handle_get_parent_acknowledgments_for_admin(handler, user, params):
     conn.close()
     send_json(handler, [dict(r) for r in rows])
 
+# ─── CHANGE PASSWORD ──────────────────────────────────────────────────────────
+
+def handle_change_password(handler, user, body):
+    new_password = body.get("new_password", "")
+    if not new_password or len(new_password) < 6:
+        return send_error(handler, "new_password must be at least 6 characters")
+    new_hash = hash_password(new_password)
+    conn = get_db()
+    if user["role"] == "parent":
+        conn.execute("UPDATE parent_accounts SET password_hash=?, must_change_password=0 WHERE id=?",
+                     (new_hash, user["id"]))
+    else:
+        conn.execute("UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?",
+                     (new_hash, user["id"]))
+    conn.commit()
+    conn.close()
+    write_audit(user, "change_password", ip=get_client_ip(handler))
+    send_json(handler, {"message": "Password updated"})
+
+# ─── HEALTH ───────────────────────────────────────────────────────────────────
+
+def handle_health(handler):
+    try:
+        conn = get_db()
+        conn.execute("SELECT 1").fetchone()
+        conn.close()
+        send_json(handler, {"status": "ok", "db": "connected", "version": "1.0.0"})
+    except Exception:
+        send_json(handler, {"status": "degraded", "db": "error"}, 503)
+
+# ─── CSV EXPORT ───────────────────────────────────────────────────────────────
+
+def handle_export_pupils(handler, user):
+    if user["role"] not in ("admin", "teacher"):
+        return send_error(handler, "Forbidden", 403)
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT p.admission_number, p.first_name, p.last_name, p.other_name,
+               p.gender, p.date_of_birth, c.name as class_name, p.blood_group,
+               p.religion, p.parent_name, p.parent_phone, p.parent_email, p.status
+        FROM pupils p
+        LEFT JOIN classes c ON c.id = p.class_id
+        WHERE p.status = 'active'
+        ORDER BY c.level, p.last_name, p.first_name
+    """).fetchall()
+    conn.close()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Admission No", "First Name", "Last Name", "Other Name", "Gender",
+                     "DOB", "Class", "Blood Group", "Religion",
+                     "Parent Name", "Parent Phone", "Parent Email", "Status"])
+    for r in rows:
+        writer.writerow([r["admission_number"] or "", r["first_name"], r["last_name"],
+                         r["other_name"] or "", r["gender"] or "", r["date_of_birth"] or "",
+                         r["class_name"] or "", r["blood_group"] or "", r["religion"] or "",
+                         r["parent_name"] or "", r["parent_phone"] or "",
+                         r["parent_email"] or "", r["status"]])
+    content = ("\ufeff" + output.getvalue()).encode("utf-8")
+    date_str = datetime.now().strftime("%Y%m%d")
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/csv; charset=utf-8")
+    handler.send_header("Content-Disposition", f'attachment; filename="pupils_{date_str}.csv"')
+    handler.send_header("Content-Length", str(len(content)))
+    add_security_headers(handler)
+    handler.end_headers()
+    handler.wfile.write(content)
+
+def handle_export_results(handler, user, params):
+    if user["role"] not in ("admin", "teacher"):
+        return send_error(handler, "Forbidden", 403)
+    term_id = params.get("term_id", [None])[0]
+    if not term_id:
+        return send_error(handler, "term_id is required")
+    conn = get_db()
+    term = conn.execute("SELECT * FROM terms WHERE id=?", (term_id,)).fetchone()
+    if not term:
+        conn.close()
+        return send_error(handler, "Term not found", 404)
+    rows = conn.execute("""
+        SELECT p.first_name, p.last_name, p.admission_number, c.name as class_name,
+               s.name as subject_name, r.ca_score, r.exam_score,
+               (r.ca_score + r.exam_score) as total
+        FROM results r
+        JOIN pupils p ON p.id = r.pupil_id
+        JOIN subjects s ON s.id = r.subject_id
+        LEFT JOIN classes c ON c.id = p.class_id
+        WHERE r.term_id = ?
+        ORDER BY p.last_name, p.first_name, s.sort_order
+    """, (term_id,)).fetchall()
+    conn.close()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["First Name", "Last Name", "Admission No", "Class", "Subject",
+                     "CA Score", "Exam Score", "Total"])
+    for r in rows:
+        writer.writerow([r["first_name"], r["last_name"], r["admission_number"] or "",
+                         r["class_name"] or "", r["subject_name"],
+                         r["ca_score"] or 0, r["exam_score"] or 0, r["total"] or 0])
+    content = ("\ufeff" + output.getvalue()).encode("utf-8")
+    fname = f"results_{term['academic_year'].replace('/','-')}_term{term['term_number']}.csv"
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/csv; charset=utf-8")
+    handler.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+    handler.send_header("Content-Length", str(len(content)))
+    add_security_headers(handler)
+    handler.end_headers()
+    handler.wfile.write(content)
+
+def handle_export_fees(handler, user, params):
+    if user["role"] != "admin":
+        return send_error(handler, "Forbidden", 403)
+    term_id = params.get("term_id", [None])[0]
+    if not term_id:
+        return send_error(handler, "term_id is required")
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT p.first_name, p.last_name, p.admission_number, c.name as class_name,
+               fs.fee_name, fp.amount_paid, fp.payment_date, fp.payment_reference,
+               CASE WHEN fp.is_parent_payment=1 THEN 'Parent' ELSE 'Staff' END as recorded_by_type
+        FROM fee_payments fp
+        JOIN pupils p ON p.id = fp.pupil_id
+        JOIN fee_structures fs ON fs.id = fp.fee_structure_id
+        LEFT JOIN classes c ON c.id = p.class_id
+        WHERE fp.term_id = ?
+        ORDER BY p.last_name, p.first_name
+    """, (term_id,)).fetchall()
+    conn.close()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Pupil Name", "Admission No", "Class", "Fee Item",
+                     "Amount Paid", "Payment Date", "Reference", "Recorded By"])
+    for r in rows:
+        writer.writerow([f"{r['first_name']} {r['last_name']}", r["admission_number"] or "",
+                         r["class_name"] or "", r["fee_name"], r["amount_paid"] or 0,
+                         r["payment_date"] or "", r["payment_reference"] or "",
+                         r["recorded_by_type"]])
+    content = ("\ufeff" + output.getvalue()).encode("utf-8")
+    date_str = datetime.now().strftime("%Y%m%d")
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/csv; charset=utf-8")
+    handler.send_header("Content-Disposition", f'attachment; filename="fees_{date_str}.csv"')
+    handler.send_header("Content-Length", str(len(content)))
+    add_security_headers(handler)
+    handler.end_headers()
+    handler.wfile.write(content)
+
+def handle_get_audit_log(handler, user, params):
+    if user["role"] != "admin":
+        return send_error(handler, "Forbidden", 403)
+    action_filter = params.get("action", [None])[0]
+    conn = get_db()
+    if action_filter:
+        rows = conn.execute("""SELECT * FROM audit_log WHERE action=?
+                               ORDER BY created_at DESC LIMIT 200""", (action_filter,)).fetchall()
+    else:
+        rows = conn.execute("""SELECT * FROM audit_log
+                               ORDER BY created_at DESC LIMIT 200""").fetchall()
+    conn.close()
+    send_json(handler, [dict(r) for r in rows])
+
 # ─── HTTP REQUEST HANDLER ─────────────────────────────────────────────────────
 
 class SchoolHandler(http.server.BaseHTTPRequestHandler):
@@ -1464,8 +1957,8 @@ class SchoolHandler(http.server.BaseHTTPRequestHandler):
             pass
 
     def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_response(204)
+        add_security_headers(self)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
         self.end_headers()
@@ -1501,6 +1994,10 @@ class SchoolHandler(http.server.BaseHTTPRequestHandler):
         # Serve static files
         if not path.startswith("/api"):
             return self.serve_static(path)
+
+        # Public health check (before auth)
+        if path == "/health" and method == "GET":
+            return handle_health(self)
 
         # API routes
         body = read_body(self) if method in ("POST", "PUT") else {}
@@ -1685,6 +2182,22 @@ class SchoolHandler(http.server.BaseHTTPRequestHandler):
             if method == "DELETE":
                 return handle_delete_notice(self, user, m.group(1))
 
+        # Change password
+        if path == "/api/auth/change-password" and method == "POST":
+            return handle_change_password(self, user, body)
+
+        # CSV Exports
+        if path == "/api/export/pupils" and method == "GET":
+            return handle_export_pupils(self, user)
+        if path == "/api/export/results" and method == "GET":
+            return handle_export_results(self, user, params)
+        if path == "/api/export/fees" and method == "GET":
+            return handle_export_fees(self, user, params)
+
+        # Audit log
+        if path == "/api/audit-log" and method == "GET":
+            return handle_get_audit_log(self, user, params)
+
         send_error(self, "Not found", 404)
 
     def serve_static(self, path):
@@ -1701,6 +2214,7 @@ class SchoolHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(content)))
+            add_security_headers(self)
             self.end_headers()
             self.wfile.write(content)
         except Exception as e:

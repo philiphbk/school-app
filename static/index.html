@@ -6,6 +6,7 @@
   <title>GISL Schools Management System</title>
   <meta name="description" content="GISL Schools Management System — manage pupils, teachers, results, fees and parent communications." />
   <link rel="stylesheet" href="/css/style.css" />
+  <link rel="stylesheet" href="/css/animations.css" />
 </head>
 <body>
 
@@ -26,6 +27,27 @@
         <input type="password" id="login-password" autocomplete="current-password" placeholder="••••••••" required />
       </div>
       <button type="submit" class="btn btn-primary btn-full" id="login-btn">Sign In</button>
+    </form>
+  </div>
+</div>
+
+<!-- ═══════════════ FORCE PASSWORD CHANGE OVERLAY ═══════════════ -->
+<div id="force-pw-overlay" class="login-page hidden" style="z-index:9999">
+  <div class="login-card">
+    <div class="login-logo">🔐</div>
+    <h1 class="login-title">Change Your Password</h1>
+    <p class="login-subtitle">You must set a new password before continuing.</p>
+    <div id="force-pw-error" class="alert alert-error hidden"></div>
+    <form id="force-pw-form">
+      <div class="form-group">
+        <label>New Password</label>
+        <input type="password" id="force-new-pw" minlength="6" required placeholder="Minimum 6 characters" />
+      </div>
+      <div class="form-group">
+        <label>Confirm Password</label>
+        <input type="password" id="force-confirm-pw" required placeholder="Repeat new password" />
+      </div>
+      <button type="submit" class="btn btn-primary btn-full" id="force-pw-btn">Set Password</button>
     </form>
   </div>
 </div>
@@ -117,6 +139,7 @@
         <h2>Pupils</h2>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn btn-secondary admin-only" onclick="exportParents()">📋 Export Parent Contacts</button>
+          <button class="btn btn-secondary admin-only" onclick="exportPupilsCSV()">📥 Export All Pupils</button>
           <button class="btn btn-secondary admin-only" style="background:#7B1D1D;color:white;border:none" onclick="showBulkIDCardModal()">🪪 Print ID Cards</button>
           <button class="btn btn-primary admin-only" onclick="showAddPupil()">+ Add Pupil</button>
         </div>
@@ -151,7 +174,11 @@
     <section id="page-results" class="page">
       <div class="page-header">
         <h2>Results Entry</h2>
-        <div style="font-size:13px;color:var(--gray-400)">Select a class and term — all subjects load at once</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <div style="font-size:13px;color:var(--gray-400)">Select a class and term — all subjects load at once</div>
+          <button class="btn btn-secondary admin-only" onclick="exportResultsCSV()">📥 Export CSV</button>
+          <button class="btn btn-secondary" onclick="showBulkResultsImport()">📤 Import CSV</button>
+        </div>
       </div>
       <div class="results-controls">
         <div class="form-row" style="align-items:flex-end;gap:12px">
@@ -177,7 +204,10 @@
     <section id="page-fees" class="page">
       <div class="page-header">
         <h2>Fee Management</h2>
-        <button class="btn btn-primary" onclick="openFeeStructureModal()">+ Add Fee Item</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-secondary" onclick="exportFeesCSV()">📥 Export CSV</button>
+          <button class="btn btn-primary" onclick="openFeeStructureModal()">+ Add Fee Item</button>
+        </div>
       </div>
       <div class="tab-bar">
         <button class="tab-btn active" onclick="loadFeesTab('structure')">Fee Structure</button>
@@ -237,6 +267,11 @@
             </div>
             <button type="submit" class="btn btn-primary">Update Password</button>
           </form>
+        </div>
+        <div class="settings-card admin-only" id="audit-log-card">
+          <h3>Audit Log</h3>
+          <p style="font-size:13px;color:var(--gray-500);margin-bottom:10px">Recent activity on the system.</p>
+          <div id="audit-log-list"><div class="loading">Loading…</div></div>
         </div>
       </div>
     </section>
@@ -310,6 +345,7 @@
 <!-- Toast notifications -->
 <div id="toast" class="toast hidden"></div>
 
+<script src="/js/logger.js"></script>
 <script src="/js/app.js"></script>
 </body>
 </html>
