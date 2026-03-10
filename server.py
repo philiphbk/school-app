@@ -90,7 +90,9 @@ def is_production_env(value):
 # Railway (and most cloud platforms) inject a PORT environment variable.
 # Fall back to 8080 for local development.
 PORT = int(env_text("PORT", "8080"))
-ENVIRONMENT = env_text("ENVIRONMENT", env_text("ENV", "development")).lower() or "development"
+_KNOWN_ENVS = {"production", "prod", "development", "dev", "test", "staging"}
+_raw_env = env_text("ENVIRONMENT", "").lower() or env_text("ENV", "").lower()
+ENVIRONMENT = _raw_env if _raw_env in _KNOWN_ENVS else "development"
 LOG_LEVEL = env_text("LOG_LEVEL", "INFO").upper() or "INFO"
 
 # CORS
