@@ -64,7 +64,7 @@ async function apiFetch(path, options = {}) {
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(API + path, { ...options, headers });
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401) {
+  if (res.status === 401 && path !== '/api/auth/login') {
     localStorage.removeItem('token');
     currentUser = null;
     document.getElementById('app').classList.add('hidden');
@@ -130,6 +130,10 @@ async function initAuth() {
   if (!token) return;
   try {
     currentUser = await apiFetch('/api/auth/me');
+    if (currentUser.must_change_password) {
+      showForcePasswordChange();
+      return;
+    }
     startApp();
   } catch {
     localStorage.removeItem('token');
@@ -4060,12 +4064,15 @@ async function loadBackupList() {
     const data = await apiFetch('/api/admin/backups');
     const backups = data.backups || [];
     el.innerHTML = backups.length ? `
-      <div style="max-height:240px;overflow:auto">
+      <div style="max-height:300px;overflow:auto">
         ${backups.map(item => `
-          <div style="border-bottom:1px solid var(--gray-100);padding:8px 0">
-            <div style="font-size:13px;font-weight:600">${esc(item.filename)}</div>
-            <div style="font-size:12px;color:var(--gray-500)">${new Date(item.modified_at).toLocaleString()}</div>
-            <div style="font-size:12px;color:var(--gray-400)">${Number(item.size || 0).toLocaleString()} bytes</div>
+          <div style="border-bottom:1px solid var(--gray-100);padding:8px 0;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:600;word-break:break-all">${esc(item.filename)}</div>
+              <div style="font-size:12px;color:var(--gray-500)">${new Date(item.modified_at).toLocaleString()} &mdash; ${(Number(item.size || 0) / 1024).toFixed(1)} KB</div>
+            </div>
+            <button class="btn btn-sm btn-secondary" onclick="downloadBackup('${esc(item.filename)}')">Download</button>
+            <button class="btn btn-sm btn-danger" onclick="restoreBackup('${esc(item.filename)}')">Restore</button>
           </div>`).join('')}
       </div>` : '<div class="empty-state">No backups created yet.</div>';
   } catch (err) {
@@ -4083,6 +4090,61 @@ async function createSystemBackup() {
     showToast(res.message || 'Backup created', 'success');
     if (document.getElementById('backup-label')) document.getElementById('backup-label').value = '';
     loadBackupList();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function downloadBackup(filename) {
+  try {
+    const token = localStorage.getItem('token');
+    const res = await fetch(`/api/admin/backups/${encodeURIComponent(filename)}`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!res.ok) throw new Error('Download failed');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function restoreBackup(filename) {
+  if (!confirm(`Restore database from "${filename}"?\n\nA safety backup of the current database will be created first.\nThe page will reload after the restore completes.`)) return;
+  try {
+    const res = await apiFetch(`/api/admin/backups/${encodeURIComponent(filename)}/restore`, { method: 'POST' });
+    showToast((res.message || 'Database restored') + ' Reloading…', 'success', 0);
+    setTimeout(() => window.location.reload(), 3000);
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function restoreFromUpload() {
+  const input = document.getElementById('restore-upload-input');
+  if (!input || !input.files[0]) return showToast('Please select a .db file first', 'error');
+  const file = input.files[0];
+  if (!file.name.endsWith('.db')) return showToast('File must be a .db (SQLite) file', 'error');
+  if (!confirm(`Restore database from "${file.name}"?\n\nA safety backup of the current database will be created first.\nThe page will reload after the restore completes.`)) return;
+  try {
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const chunkSize = 8192;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    const res = await apiFetch('/api/admin/restore-upload', {
+      method: 'POST',
+      body: JSON.stringify({ data: btoa(binary) })
+    });
+    showToast((res.message || 'Database restored') + ' Reloading…', 'success', 0);
+    setTimeout(() => window.location.reload(), 3000);
   } catch (err) {
     showToast(err.message, 'error');
   }

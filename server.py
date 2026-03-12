@@ -1294,6 +1294,7 @@ def handle_logout(handler, user):
 
 def handle_get_me(handler, user):
     result = {k: user[k] for k in ["id","name","email","role","phone"]}
+    result["must_change_password"] = bool(user["must_change_password"]) if "must_change_password" in user.keys() else False
     if user["role"] == "teacher":
         conn = get_db()
         cls = conn.execute("SELECT * FROM classes WHERE teacher_id = ?", (user["id"],)).fetchone()
@@ -2737,6 +2738,97 @@ def handle_create_backup(handler, user, body):
     }, 201)
 
 
+def handle_download_backup(handler, user, filename):
+    if user["role"] != "admin":
+        return send_error(handler, "Forbidden", 403)
+    safe_name = os.path.basename(filename)
+    if not safe_name.endswith(".db"):
+        return send_error(handler, "Invalid backup filename", 400)
+    filepath = os.path.join(BACKUP_DIR, safe_name)
+    if not os.path.isfile(filepath):
+        return send_error(handler, "Backup not found", 404)
+    try:
+        with open(filepath, "rb") as f:
+            content = f.read()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/octet-stream")
+        handler.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
+        handler.send_header("Content-Length", str(len(content)))
+        add_security_headers(handler)
+        handler.end_headers()
+        handler.wfile.write(content)
+    except Exception as e:
+        send_error(handler, str(e), 500)
+
+
+def handle_restore_backup(handler, user, filename):
+    if user["role"] != "admin":
+        return send_error(handler, "Forbidden", 403)
+    safe_name = os.path.basename(filename)
+    if not safe_name.endswith(".db"):
+        return send_error(handler, "Invalid backup filename", 400)
+    src_path = os.path.join(BACKUP_DIR, safe_name)
+    if not os.path.isfile(src_path):
+        return send_error(handler, "Backup not found", 404)
+    try:
+        test_conn = sqlite3.connect(src_path)
+        test_conn.execute("SELECT name FROM sqlite_master LIMIT 1")
+        test_conn.close()
+    except Exception:
+        return send_error(handler, "File is not a valid SQLite database", 400)
+    safety_path = create_database_backup("pre-restore")
+    try:
+        shutil.copy2(src_path, DB_PATH)
+    except Exception as e:
+        return send_error(handler, f"Restore failed: {e}", 500)
+    write_audit(user, "restore_backup", target_type="backup", target_id=safe_name, ip=get_client_ip(handler))
+    safety_name = os.path.basename(safety_path) if safety_path else "N/A"
+    send_json(handler, {"message": f"Database restored from {safe_name}. Safety backup saved as {safety_name}."})
+
+
+def handle_restore_upload(handler, user, body):
+    if user["role"] != "admin":
+        return send_error(handler, "Forbidden", 403)
+    data_b64 = body.get("data", "")
+    if not data_b64:
+        return send_error(handler, "No file data provided")
+    try:
+        file_bytes = base64.b64decode(data_b64)
+    except Exception:
+        return send_error(handler, "Invalid file data (not valid base64)")
+    if not file_bytes.startswith(b"SQLite format 3"):
+        return send_error(handler, "Uploaded file is not a valid SQLite database")
+    if len(file_bytes) > 100 * 1024 * 1024:
+        return send_error(handler, "File too large (max 100 MB)")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    tmp_path = os.path.join(BACKUP_DIR, f"_upload_{stamp}.db")
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(file_bytes)
+        test_conn = sqlite3.connect(tmp_path)
+        test_conn.execute("SELECT name FROM sqlite_master LIMIT 1")
+        test_conn.close()
+    except Exception as e:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        return send_error(handler, f"Invalid database file: {e}")
+    safety_path = create_database_backup("pre-restore-upload")
+    try:
+        shutil.copy2(tmp_path, DB_PATH)
+    except Exception as e:
+        return send_error(handler, f"Restore failed: {e}", 500)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+    write_audit(user, "restore_upload", target_type="backup", details="Restored from uploaded file", ip=get_client_ip(handler))
+    safety_name = os.path.basename(safety_path) if safety_path else "N/A"
+    send_json(handler, {"message": f"Database restored from uploaded file. Safety backup saved as {safety_name}."})
+
+
 def handle_health(handler):
     try:
         conn = get_db()
@@ -4070,6 +4162,14 @@ class SchoolHandler(http.server.BaseHTTPRequestHandler):
             return handle_list_backups(self, user)
         if path == "/api/admin/backups" and method == "POST":
             return handle_create_backup(self, user, body)
+        m = re.match(r"^/api/admin/backups/([^/]+)/restore$", path)
+        if m and method == "POST":
+            return handle_restore_backup(self, user, m.group(1))
+        m = re.match(r"^/api/admin/backups/([^/]+)$", path)
+        if m and method == "GET":
+            return handle_download_backup(self, user, m.group(1))
+        if path == "/api/admin/restore-upload" and method == "POST":
+            return handle_restore_upload(self, user, body)
 
         # Stats
         if path == "/api/stats" and method == "GET":
