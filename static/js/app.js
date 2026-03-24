@@ -612,9 +612,28 @@ function showAddPupil() {
 }
 
 function editPupil(id) {
-  const pupil = appData.pupils.find(p => p.id === id);
-  if (pupil) openModal('Edit Pupil', pupilForm(pupil));
-  else apiFetch(`/api/pupils/${id}`).then(p => openModal('Edit Pupil', pupilForm(p))).catch(err => showToast('Error loading pupil: ' + err.message, 'error'));
+  const pupilId = String(id);
+  const pupil = appData.pupils.find(p => String(p.id) === pupilId);
+  if (pupil) {
+    openModal('Edit Pupil', pupilForm(pupil));
+    return;
+  }
+
+  // Keep UX responsive when list cache is cold/mismatched
+  openModal('Edit Pupil', '<div class="loading">Loading pupil…</div>');
+  apiFetch(`/api/pupils/${encodeURIComponent(pupilId)}`)
+    .then(p => openModal('Edit Pupil', pupilForm(p)))
+    .catch(err => {
+      closeModal();
+      showToast('Error loading pupil: ' + err.message, 'error');
+    });
+}
+
+function editPupilFromProfile(id) {
+  // Close profile modal first, then open edit modal on next tick.
+  // Prevents openModal->closeModal race from inline chained calls.
+  closeModal();
+  setTimeout(() => editPupil(id), 0);
 }
 
 function pupilForm(pupil) {
@@ -829,7 +848,7 @@ function pupilProfile(p, terms) {
         </div>
       </div>
       ${isAdmin ? `<div style="margin-left:auto;display:flex;gap:8px">
-        <button class="btn btn-secondary btn-sm" onclick="editPupil('${p.id}');closeModal()">✏️ Edit</button>
+        <button class="btn btn-secondary btn-sm" onclick="editPupilFromProfile('${p.id}')">✏️ Edit</button>
       </div>` : ''}
     </div>
     <div class="profile-sections" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px">

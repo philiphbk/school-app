@@ -404,21 +404,40 @@ def ensure_admin_bootstrap(conn):
 # ─── DATABASE ─────────────────────────────────────────────────────────────────
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")  # 30 s busy-wait before raising "locked"
     return conn
+
+
+from contextlib import contextmanager
+
+@contextmanager
+def db_conn():
+    """Context manager that guarantees the connection is closed even on exception.
+
+    Usage:
+        with db_conn() as conn:
+            rows = conn.execute("SELECT …").fetchall()
+            conn.commit()
+    """
+    conn = get_db()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 def init_db():
     conn = get_db()
-    c = conn.cursor()
-
-    # Schema compatibility check.
-    # Legacy deployments may contain old INTEGER PK tables. In development you may
-    # allow destructive repair, but in production this is blocked unless explicitly enabled.
-    _old_schema_tables = ["users", "parent_accounts"]
     try:
+        c = conn.cursor()
+
+        # Schema compatibility check.
+        # Legacy deployments may contain old INTEGER PK tables. In development you may
+        # allow destructive repair, but in production this is blocked unless explicitly enabled.
+        _old_schema_tables = ["users", "parent_accounts"]
         for tbl in _old_schema_tables:
             cols = {row[1]: row[2] for row in c.execute(f"PRAGMA table_info({tbl})").fetchall()}
             if not cols:
@@ -438,410 +457,408 @@ def init_db():
                     c.execute(f"DROP TABLE IF EXISTS {t}")
                 conn.commit()
                 break
-    except Exception:
-        conn.close()
-        raise
 
-    c.executescript("""
-    CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        email TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        role TEXT NOT NULL CHECK(role IN ('admin','teacher')),
-        phone TEXT,
-        is_active INTEGER DEFAULT 1,
-        created_at TEXT DEFAULT (datetime('now'))
-    );
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('admin','teacher')),
+            phone TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
 
-    CREATE TABLE IF NOT EXISTS sessions (
-        token TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now'))
-    );
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
 
-    CREATE TABLE IF NOT EXISTS classes (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        level INTEGER NOT NULL,
-        stream TEXT DEFAULT 'A',
-        teacher_id TEXT,
-        created_at TEXT DEFAULT (datetime('now'))
-    );
+        CREATE TABLE IF NOT EXISTS classes (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            level INTEGER NOT NULL,
+            stream TEXT DEFAULT 'A',
+            teacher_id TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
 
-    CREATE TABLE IF NOT EXISTS subjects (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        is_active INTEGER DEFAULT 1,
-        sort_order INTEGER DEFAULT 0
-    );
+        CREATE TABLE IF NOT EXISTS subjects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            is_active INTEGER DEFAULT 1,
+            sort_order INTEGER DEFAULT 0
+        );
 
-    CREATE TABLE IF NOT EXISTS terms (
-        id TEXT PRIMARY KEY,
-        academic_year TEXT NOT NULL,
-        term_number INTEGER NOT NULL CHECK(term_number IN (1,2,3)),
-        is_current INTEGER DEFAULT 0,
-        start_date TEXT,
-        end_date TEXT,
-        created_at TEXT DEFAULT (datetime('now'))
-    );
+        CREATE TABLE IF NOT EXISTS terms (
+            id TEXT PRIMARY KEY,
+            academic_year TEXT NOT NULL,
+            term_number INTEGER NOT NULL CHECK(term_number IN (1,2,3)),
+            is_current INTEGER DEFAULT 0,
+            start_date TEXT,
+            end_date TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
 
-    CREATE TABLE IF NOT EXISTS pupils (
-        id TEXT PRIMARY KEY,
-        first_name TEXT NOT NULL,
-        last_name TEXT NOT NULL,
-        other_name TEXT,
-        admission_number TEXT UNIQUE,
-        date_of_birth TEXT,
-        gender TEXT CHECK(gender IN ('male','female')),
-        class_id TEXT,
-        blood_group TEXT,
-        religion TEXT,
-        photo TEXT,
-        parent_name TEXT,
-        parent_phone TEXT,
-        parent_email TEXT,
-        parent_address TEXT,
-        parent_relationship TEXT,
-        emergency_name TEXT,
-        emergency_phone TEXT,
-        status TEXT DEFAULT 'active' CHECK(status IN ('active','archived','graduated')),
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
-    );
+        CREATE TABLE IF NOT EXISTS pupils (
+            id TEXT PRIMARY KEY,
+            first_name TEXT NOT NULL,
+            last_name TEXT NOT NULL,
+            other_name TEXT,
+            admission_number TEXT UNIQUE,
+            date_of_birth TEXT,
+            gender TEXT CHECK(gender IN ('male','female')),
+            class_id TEXT,
+            blood_group TEXT,
+            religion TEXT,
+            photo TEXT,
+            parent_name TEXT,
+            parent_phone TEXT,
+            parent_email TEXT,
+            parent_address TEXT,
+            parent_relationship TEXT,
+            emergency_name TEXT,
+            emergency_phone TEXT,
+            status TEXT DEFAULT 'active' CHECK(status IN ('active','archived','graduated')),
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
 
-    CREATE TABLE IF NOT EXISTS results (
-        id TEXT PRIMARY KEY,
-        pupil_id TEXT NOT NULL,
-        subject_id TEXT NOT NULL,
-        term_id TEXT NOT NULL,
-        ca_score REAL DEFAULT 0,
-        exam_score REAL DEFAULT 0,
-        entered_by TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now')),
-        UNIQUE(pupil_id, subject_id, term_id)
-    );
+        CREATE TABLE IF NOT EXISTS results (
+            id TEXT PRIMARY KEY,
+            pupil_id TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            term_id TEXT NOT NULL,
+            ca_score REAL DEFAULT 0,
+            exam_score REAL DEFAULT 0,
+            entered_by TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(pupil_id, subject_id, term_id)
+        );
 
-    CREATE TABLE IF NOT EXISTS conduct_ratings (
-        id TEXT PRIMARY KEY,
-        pupil_id TEXT NOT NULL,
-        term_id TEXT NOT NULL,
-        punctuality TEXT DEFAULT '',
-        honesty TEXT DEFAULT '',
-        cleanliness TEXT DEFAULT '',
-        leadership TEXT DEFAULT '',
-        politeness TEXT DEFAULT '',
-        attentiveness TEXT DEFAULT '',
-        writing TEXT DEFAULT '',
-        handwork TEXT DEFAULT '',
-        verbal_fluency TEXT DEFAULT '',
-        drama TEXT DEFAULT '',
-        sports TEXT DEFAULT '',
-        teacher_comment TEXT DEFAULT '',
-        admin_comment TEXT DEFAULT '',
-        updated_at TEXT DEFAULT (datetime('now')),
-        UNIQUE(pupil_id, term_id)
-    );
+        CREATE TABLE IF NOT EXISTS conduct_ratings (
+            id TEXT PRIMARY KEY,
+            pupil_id TEXT NOT NULL,
+            term_id TEXT NOT NULL,
+            punctuality TEXT DEFAULT '',
+            honesty TEXT DEFAULT '',
+            cleanliness TEXT DEFAULT '',
+            leadership TEXT DEFAULT '',
+            politeness TEXT DEFAULT '',
+            attentiveness TEXT DEFAULT '',
+            writing TEXT DEFAULT '',
+            handwork TEXT DEFAULT '',
+            verbal_fluency TEXT DEFAULT '',
+            drama TEXT DEFAULT '',
+            sports TEXT DEFAULT '',
+            teacher_comment TEXT DEFAULT '',
+            admin_comment TEXT DEFAULT '',
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(pupil_id, term_id)
+        );
 
-    CREATE TABLE IF NOT EXISTS parent_accounts (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        email TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        phone TEXT,
-        is_active INTEGER DEFAULT 1,
-        created_at TEXT DEFAULT (datetime('now'))
-    );
+        CREATE TABLE IF NOT EXISTS parent_accounts (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            phone TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
 
-    CREATE TABLE IF NOT EXISTS parent_acknowledgments (
-        id TEXT PRIMARY KEY,
-        pupil_id TEXT NOT NULL,
-        term_id TEXT NOT NULL,
-        parent_account_id TEXT,
-        acknowledged_at TEXT DEFAULT (datetime('now')),
-        parent_comment TEXT DEFAULT '',
-        UNIQUE(pupil_id, term_id)
-    );
+        CREATE TABLE IF NOT EXISTS parent_acknowledgments (
+            id TEXT PRIMARY KEY,
+            pupil_id TEXT NOT NULL,
+            term_id TEXT NOT NULL,
+            parent_account_id TEXT,
+            acknowledged_at TEXT DEFAULT (datetime('now')),
+            parent_comment TEXT DEFAULT '',
+            UNIQUE(pupil_id, term_id)
+        );
 
-    CREATE TABLE IF NOT EXISTS school_notices (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        body TEXT NOT NULL,
-        posted_by TEXT NOT NULL,
-        posted_at TEXT DEFAULT (datetime('now')),
-        is_active INTEGER DEFAULT 1,
-        target TEXT DEFAULT 'all'
-    );
+        CREATE TABLE IF NOT EXISTS school_notices (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            posted_by TEXT NOT NULL,
+            posted_at TEXT DEFAULT (datetime('now')),
+            is_active INTEGER DEFAULT 1,
+            target TEXT DEFAULT 'all'
+        );
 
-    CREATE TABLE IF NOT EXISTS fee_structures (
-        id TEXT PRIMARY KEY,
-        class_id TEXT,
-        academic_year TEXT NOT NULL,
-        term_number INTEGER NOT NULL,
-        fee_name TEXT NOT NULL,
-        new_pupil_amount REAL DEFAULT 0,
-        returning_pupil_amount REAL DEFAULT 0,
-        is_optional INTEGER DEFAULT 0,
-        sort_order INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT (datetime('now'))
-    );
+        CREATE TABLE IF NOT EXISTS fee_structures (
+            id TEXT PRIMARY KEY,
+            class_id TEXT,
+            academic_year TEXT NOT NULL,
+            term_number INTEGER NOT NULL,
+            fee_name TEXT NOT NULL,
+            new_pupil_amount REAL DEFAULT 0,
+            returning_pupil_amount REAL DEFAULT 0,
+            is_optional INTEGER DEFAULT 0,
+            sort_order INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
 
-    CREATE TABLE IF NOT EXISTS fee_payments (
-        id TEXT PRIMARY KEY,
-        pupil_id TEXT NOT NULL,
-        term_id TEXT NOT NULL,
-        fee_structure_id TEXT NOT NULL,
-        amount_paid REAL DEFAULT 0,
-        payment_date TEXT,
-        payment_reference TEXT,
-        notes TEXT,
-        recorded_by TEXT,
-        is_parent_payment INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT (datetime('now')),
-        UNIQUE(pupil_id, term_id, fee_structure_id)
-    );
+        CREATE TABLE IF NOT EXISTS fee_payments (
+            id TEXT PRIMARY KEY,
+            pupil_id TEXT NOT NULL,
+            term_id TEXT NOT NULL,
+            fee_structure_id TEXT NOT NULL,
+            amount_paid REAL DEFAULT 0,
+            payment_date TEXT,
+            payment_reference TEXT,
+            notes TEXT,
+            recorded_by TEXT,
+            is_parent_payment INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(pupil_id, term_id, fee_structure_id)
+        );
 
-    CREATE TABLE IF NOT EXISTS skill_assessments (
-        id TEXT PRIMARY KEY,
-        pupil_id TEXT NOT NULL,
-        term_id TEXT NOT NULL,
-        skill_name TEXT NOT NULL,
-        grade TEXT DEFAULT '',
-        teacher_comment TEXT DEFAULT '',
-        admin_comment TEXT DEFAULT '',
-        updated_at TEXT DEFAULT (datetime('now')),
-        UNIQUE(pupil_id, term_id, skill_name)
-    );
+        CREATE TABLE IF NOT EXISTS skill_assessments (
+            id TEXT PRIMARY KEY,
+            pupil_id TEXT NOT NULL,
+            term_id TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            grade TEXT DEFAULT '',
+            teacher_comment TEXT DEFAULT '',
+            admin_comment TEXT DEFAULT '',
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(pupil_id, term_id, skill_name)
+        );
 
-    CREATE TABLE IF NOT EXISTS audit_log (
-        id TEXT PRIMARY KEY,
-        user_id TEXT,
-        user_email TEXT,
-        action TEXT NOT NULL,
-        target_type TEXT,
-        target_id TEXT,
-        details TEXT,
-        ip_address TEXT,
-        created_at TEXT DEFAULT (datetime('now'))
-    );
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            user_email TEXT,
+            action TEXT NOT NULL,
+            target_type TEXT,
+            target_id TEXT,
+            details TEXT,
+            ip_address TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
 
-    CREATE TABLE IF NOT EXISTS notification_log (
-        id TEXT PRIMARY KEY,
-        recipient_name TEXT,
-        recipient_phone TEXT,
-        recipient_email TEXT,
-        channel TEXT NOT NULL,
-        event_type TEXT NOT NULL,
-        message TEXT NOT NULL,
-        status TEXT DEFAULT 'pending',
-        provider_response TEXT DEFAULT '',
-        created_at TEXT DEFAULT (datetime('now'))
-    );
+        CREATE TABLE IF NOT EXISTS notification_log (
+            id TEXT PRIMARY KEY,
+            recipient_name TEXT,
+            recipient_phone TEXT,
+            recipient_email TEXT,
+            channel TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            message TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            provider_response TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        );
 
-    CREATE TABLE IF NOT EXISTS online_payment_transactions (
-        id TEXT PRIMARY KEY,
-        pupil_id TEXT NOT NULL,
-        term_id TEXT NOT NULL,
-        fee_structure_id TEXT NOT NULL,
-        provider TEXT NOT NULL DEFAULT 'paystack',
-        reference TEXT UNIQUE NOT NULL,
-        amount REAL NOT NULL DEFAULT 0,
-        status TEXT DEFAULT 'initialized',
-        access_code TEXT DEFAULT '',
-        authorization_url TEXT DEFAULT '',
-        metadata TEXT DEFAULT '',
-        paid_at TEXT,
-        created_by TEXT,
-        created_at TEXT DEFAULT (datetime('now'))
-    );
+        CREATE TABLE IF NOT EXISTS online_payment_transactions (
+            id TEXT PRIMARY KEY,
+            pupil_id TEXT NOT NULL,
+            term_id TEXT NOT NULL,
+            fee_structure_id TEXT NOT NULL,
+            provider TEXT NOT NULL DEFAULT 'paystack',
+            reference TEXT UNIQUE NOT NULL,
+            amount REAL NOT NULL DEFAULT 0,
+            status TEXT DEFAULT 'initialized',
+            access_code TEXT DEFAULT '',
+            authorization_url TEXT DEFAULT '',
+            metadata TEXT DEFAULT '',
+            paid_at TEXT,
+            created_by TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
 
-    CREATE TABLE IF NOT EXISTS attendance_records (
-        id TEXT PRIMARY KEY,
-        pupil_id TEXT NOT NULL,
-        class_id TEXT NOT NULL,
-        term_id TEXT,
-        attendance_date TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('present','absent','late')),
-        notes TEXT DEFAULT '',
-        marked_by TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now')),
-        UNIQUE(pupil_id, attendance_date)
-    );
+        CREATE TABLE IF NOT EXISTS attendance_records (
+            id TEXT PRIMARY KEY,
+            pupil_id TEXT NOT NULL,
+            class_id TEXT NOT NULL,
+            term_id TEXT,
+            attendance_date TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('present','absent','late')),
+            notes TEXT DEFAULT '',
+            marked_by TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(pupil_id, attendance_date)
+        );
 
-    CREATE TABLE IF NOT EXISTS homework_assignments (
-        id TEXT PRIMARY KEY,
-        class_id TEXT NOT NULL,
-        subject_id TEXT,
-        term_id TEXT,
-        title TEXT NOT NULL,
-        description TEXT DEFAULT '',
-        due_date TEXT,
-        created_by TEXT,
-        is_active INTEGER DEFAULT 1,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
-    );
+        CREATE TABLE IF NOT EXISTS homework_assignments (
+            id TEXT PRIMARY KEY,
+            class_id TEXT NOT NULL,
+            subject_id TEXT,
+            term_id TEXT,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            due_date TEXT,
+            created_by TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
 
-    CREATE TABLE IF NOT EXISTS homework_completions (
-        id TEXT PRIMARY KEY,
-        assignment_id TEXT NOT NULL,
-        pupil_id TEXT NOT NULL,
-        is_done INTEGER DEFAULT 0,
-        parent_note TEXT DEFAULT '',
-        done_at TEXT,
-        updated_at TEXT DEFAULT (datetime('now')),
-        UNIQUE(assignment_id, pupil_id)
-    );
+        CREATE TABLE IF NOT EXISTS homework_completions (
+            id TEXT PRIMARY KEY,
+            assignment_id TEXT NOT NULL,
+            pupil_id TEXT NOT NULL,
+            is_done INTEGER DEFAULT 0,
+            parent_note TEXT DEFAULT '',
+            done_at TEXT,
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(assignment_id, pupil_id)
+        );
 
-    CREATE TABLE IF NOT EXISTS school_events (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        description TEXT DEFAULT '',
-        event_date TEXT NOT NULL,
-        end_date TEXT DEFAULT '',
-        event_type TEXT DEFAULT 'general',
-        target TEXT DEFAULT 'all',
-        created_by TEXT,
-        created_at TEXT DEFAULT (datetime('now'))
-    );
+        CREATE TABLE IF NOT EXISTS school_events (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            event_date TEXT NOT NULL,
+            end_date TEXT DEFAULT '',
+            event_type TEXT DEFAULT 'general',
+            target TEXT DEFAULT 'all',
+            created_by TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
 
-    CREATE TABLE IF NOT EXISTS class_timetables (
-        id TEXT PRIMARY KEY,
-        class_id TEXT NOT NULL,
-        day_of_week TEXT NOT NULL,
-        period_name TEXT DEFAULT '',
-        subject_id TEXT,
-        start_time TEXT DEFAULT '',
-        end_time TEXT DEFAULT '',
-        teacher_name TEXT DEFAULT '',
-        location TEXT DEFAULT '',
-        created_at TEXT DEFAULT (datetime('now'))
-    );
+        CREATE TABLE IF NOT EXISTS class_timetables (
+            id TEXT PRIMARY KEY,
+            class_id TEXT NOT NULL,
+            day_of_week TEXT NOT NULL,
+            period_name TEXT DEFAULT '',
+            subject_id TEXT,
+            start_time TEXT DEFAULT '',
+            end_time TEXT DEFAULT '',
+            teacher_name TEXT DEFAULT '',
+            location TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        );
 
-    CREATE TABLE IF NOT EXISTS payroll_entries (
-        id TEXT PRIMARY KEY,
-        staff_id TEXT NOT NULL,
-        month INTEGER NOT NULL,
-        year INTEGER NOT NULL,
-        basic_salary REAL DEFAULT 0,
-        allowances REAL DEFAULT 0,
-        deductions REAL DEFAULT 0,
-        net_pay REAL DEFAULT 0,
-        notes TEXT DEFAULT '',
-        created_by TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        UNIQUE(staff_id, month, year)
-    );
-    """)
+        CREATE TABLE IF NOT EXISTS payroll_entries (
+            id TEXT PRIMARY KEY,
+            staff_id TEXT NOT NULL,
+            month INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            basic_salary REAL DEFAULT 0,
+            allowances REAL DEFAULT 0,
+            deductions REAL DEFAULT 0,
+            net_pay REAL DEFAULT 0,
+            notes TEXT DEFAULT '',
+            created_by TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(staff_id, month, year)
+        );
+        """)
 
-    # Migrations
-    # If a previous reworked schema created users.full_name instead of users.name, rename it
-    try:
-        cols = [row[1] for row in c.execute("PRAGMA table_info(users)").fetchall()]
-        if 'full_name' in cols and 'name' not in cols:
-            c.execute("ALTER TABLE users RENAME COLUMN full_name TO name")
-            conn.commit()
-    except: pass
-
-    try:
-        c.execute("ALTER TABLE classes ADD COLUMN class_type TEXT DEFAULT 'primary'")
-        conn.commit()
-    except: pass
-
-    try:
-        c.execute("ALTER TABLE sessions ADD COLUMN user_type TEXT DEFAULT 'staff'")
-        conn.commit()
-    except: pass
-
-    try:
-        c.execute("ALTER TABLE fee_payments ADD COLUMN is_parent_payment INTEGER DEFAULT 0")
-        conn.commit()
-    except: pass
-
-    try:
-        c.execute("ALTER TABLE parent_acknowledgments ADD COLUMN parent_account_id TEXT")
-        conn.commit()
-    except: pass
-
-    try:
-        c.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
-        conn.commit()
-    except: pass
-
-    for migration in (
-        "ALTER TABLE pupils ADD COLUMN allergies TEXT DEFAULT ''",
-        "ALTER TABLE pupils ADD COLUMN medical_conditions TEXT DEFAULT ''",
-        "ALTER TABLE pupils ADD COLUMN doctor_name TEXT DEFAULT ''",
-        "ALTER TABLE pupils ADD COLUMN doctor_phone TEXT DEFAULT ''",
-    ):
+        # Migrations
+        # If a previous reworked schema created users.full_name instead of users.name, rename it
         try:
-            c.execute(migration)
+            cols = [row[1] for row in c.execute("PRAGMA table_info(users)").fetchall()]
+            if 'full_name' in cols and 'name' not in cols:
+                c.execute("ALTER TABLE users RENAME COLUMN full_name TO name")
+                conn.commit()
+        except: pass
+
+        try:
+            c.execute("ALTER TABLE classes ADD COLUMN class_type TEXT DEFAULT 'primary'")
             conn.commit()
-        except:
-            pass
+        except: pass
 
-    try:
-        c.execute("ALTER TABLE parent_accounts ADD COLUMN must_change_password INTEGER DEFAULT 0")
+        try:
+            c.execute("ALTER TABLE sessions ADD COLUMN user_type TEXT DEFAULT 'staff'")
+            conn.commit()
+        except: pass
+
+        try:
+            c.execute("ALTER TABLE fee_payments ADD COLUMN is_parent_payment INTEGER DEFAULT 0")
+            conn.commit()
+        except: pass
+
+        try:
+            c.execute("ALTER TABLE parent_acknowledgments ADD COLUMN parent_account_id TEXT")
+            conn.commit()
+        except: pass
+
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
+            conn.commit()
+        except: pass
+
+        for migration in (
+            "ALTER TABLE pupils ADD COLUMN allergies TEXT DEFAULT ''",
+            "ALTER TABLE pupils ADD COLUMN medical_conditions TEXT DEFAULT ''",
+            "ALTER TABLE pupils ADD COLUMN doctor_name TEXT DEFAULT ''",
+            "ALTER TABLE pupils ADD COLUMN doctor_phone TEXT DEFAULT ''",
+        ):
+            try:
+                c.execute(migration)
+                conn.commit()
+            except:
+                pass
+
+        try:
+            c.execute("ALTER TABLE parent_accounts ADD COLUMN must_change_password INTEGER DEFAULT 0")
+            conn.commit()
+        except: pass
+
+        # Flag any existing admin still using the legacy default password as needing a change
+        try:
+            _legacy_default = hashlib.sha256(LEGACY_DEFAULT_ADMIN_PASSWORD.encode()).hexdigest()
+            c.execute("""UPDATE users SET must_change_password=1
+                         WHERE role='admin' AND password_hash=?""", (_legacy_default,))
+            conn.commit()
+        except: pass
+
+        ensure_admin_bootstrap(conn)
+
+        # Seed default classes
+        existing_classes = c.execute("SELECT COUNT(*) FROM classes").fetchone()[0]
+        if existing_classes == 0:
+            lower_classes = [
+                ("Playgroup", 0, "lower"),
+                ("Kindergarten", 1, "lower"),
+                ("Nursery 1", 2, "lower"),
+                ("Nursery 2", 3, "lower"),
+            ]
+            for name, level, ctype in lower_classes:
+                cid = str(uuid.uuid4())
+                c.execute("INSERT INTO classes (id, name, level, stream, class_type) VALUES (?, ?, ?, ?, ?)",
+                          (cid, name, level, "A", ctype))
+            for level in range(1, 7):
+                cid = str(uuid.uuid4())
+                c.execute("INSERT INTO classes (id, name, level, stream, class_type) VALUES (?, ?, ?, ?, ?)",
+                          (cid, f"Primary {level}", level, "A", "primary"))
+
+        # Seed default subjects
+        existing_subjects = c.execute("SELECT COUNT(*) FROM subjects").fetchone()[0]
+        if existing_subjects == 0:
+            subjects = [
+                "English Language", "Mathematics", "Basic Science",
+                "Social Studies", "Civic Education", "Christian Religious Studies",
+                "Nigerian Language", "Agricultural Science", "Computer Studies",
+                "Creative Arts", "Physical & Health Education"
+            ]
+            for i, name in enumerate(subjects):
+                sid = str(uuid.uuid4())
+                c.execute("INSERT INTO subjects (id, name, sort_order) VALUES (?, ?, ?)",
+                          (sid, name, i))
+
+        # Seed current term
+        existing_terms = c.execute("SELECT COUNT(*) FROM terms").fetchone()[0]
+        if existing_terms == 0:
+            tid = str(uuid.uuid4())
+            year = datetime.now().year
+            academic_year = f"{year}/{year+1}"
+            c.execute("""INSERT INTO terms (id, academic_year, term_number, is_current)
+                         VALUES (?, ?, ?, 1)""", (tid, academic_year, 1))
+
         conn.commit()
-    except: pass
-
-    # Flag any existing admin still using the legacy default password as needing a change
-    try:
-        _legacy_default = hashlib.sha256(LEGACY_DEFAULT_ADMIN_PASSWORD.encode()).hexdigest()
-        c.execute("""UPDATE users SET must_change_password=1
-                     WHERE role='admin' AND password_hash=?""", (_legacy_default,))
-        conn.commit()
-    except: pass
-
-    ensure_admin_bootstrap(conn)
-
-    # Seed default classes
-    existing_classes = c.execute("SELECT COUNT(*) FROM classes").fetchone()[0]
-    if existing_classes == 0:
-        lower_classes = [
-            ("Playgroup", 0, "lower"),
-            ("Kindergarten", 1, "lower"),
-            ("Nursery 1", 2, "lower"),
-            ("Nursery 2", 3, "lower"),
-        ]
-        for name, level, ctype in lower_classes:
-            cid = str(uuid.uuid4())
-            c.execute("INSERT INTO classes (id, name, level, stream, class_type) VALUES (?, ?, ?, ?, ?)",
-                      (cid, name, level, "A", ctype))
-        for level in range(1, 7):
-            cid = str(uuid.uuid4())
-            c.execute("INSERT INTO classes (id, name, level, stream, class_type) VALUES (?, ?, ?, ?, ?)",
-                      (cid, f"Primary {level}", level, "A", "primary"))
-
-    # Seed default subjects
-    existing_subjects = c.execute("SELECT COUNT(*) FROM subjects").fetchone()[0]
-    if existing_subjects == 0:
-        subjects = [
-            "English Language", "Mathematics", "Basic Science",
-            "Social Studies", "Civic Education", "Christian Religious Studies",
-            "Nigerian Language", "Agricultural Science", "Computer Studies",
-            "Creative Arts", "Physical & Health Education"
-        ]
-        for i, name in enumerate(subjects):
-            sid = str(uuid.uuid4())
-            c.execute("INSERT INTO subjects (id, name, sort_order) VALUES (?, ?, ?)",
-                      (sid, name, i))
-
-    # Seed current term
-    existing_terms = c.execute("SELECT COUNT(*) FROM terms").fetchone()[0]
-    if existing_terms == 0:
-        tid = str(uuid.uuid4())
-        year = datetime.now().year
-        academic_year = f"{year}/{year+1}"
-        c.execute("""INSERT INTO terms (id, academic_year, term_number, is_current)
-                     VALUES (?, ?, ?, 1)""", (tid, academic_year, 1))
-
-    conn.commit()
-    conn.close()
-    LOGGER.info("Database initialized")
+        LOGGER.info("Database initialized")
+    finally:
+        conn.close()
 
 # ─── AUTH HELPERS ─────────────────────────────────────────────────────────────
 
@@ -4521,12 +4538,13 @@ if __name__ == "__main__":
 ║  INITIAL_ADMIN_PASSWORD to bootstrap.    ║
 """
 
+    _fallback = "║     Existing admin login available.       ║\n"
     print(f"""
 ╔══════════════════════════════════════════╗
 ║     GISL Schools Management System       ║
 ║     Running at: http://localhost:{active_port}   ║
 ║                                          ║
-{bootstrap_message if bootstrap_message else '║     Existing admin login available.       ║\n'}╚══════════════════════════════════════════╝
+{bootstrap_message if bootstrap_message else _fallback}╚══════════════════════════════════════════╝
     """)
     try:
         server.serve_forever()
