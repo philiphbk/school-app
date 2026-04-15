@@ -822,6 +822,7 @@ def init_db():
                 ("Kindergarten", 1, "lower"),
                 ("Nursery 1", 2, "lower"),
                 ("Nursery 2", 3, "lower"),
+                ("Nursery 3", 4, "lower"),
             ]
             for name, level, ctype in lower_classes:
                 cid = str(uuid.uuid4())
@@ -831,6 +832,16 @@ def init_db():
                 cid = str(uuid.uuid4())
                 c.execute("INSERT INTO classes (id, name, level, stream, class_type) VALUES (?, ?, ?, ?, ?)",
                           (cid, f"Primary {level}", level, "A", "primary"))
+
+        # Migration: add Nursery 3 if it doesn't exist (for existing databases)
+        nursery3_exists = c.execute(
+            "SELECT COUNT(*) FROM classes WHERE name='Nursery 3'"
+        ).fetchone()[0]
+        if not nursery3_exists:
+            cid = str(uuid.uuid4())
+            c.execute("INSERT INTO classes (id, name, level, stream, class_type) VALUES (?, ?, ?, ?, ?)",
+                      (cid, "Nursery 3", 4, "A", "lower"))
+            conn.commit()
 
         # Seed default subjects
         existing_subjects = c.execute("SELECT COUNT(*) FROM subjects").fetchone()[0]
@@ -1551,8 +1562,8 @@ def handle_promote_class(handler, user, class_id, body=None):
         scope = "selected pupils" if requested_pupil_ids is not None else "pupils"
         return send_json(handler, {"message": f"{count} {scope} graduated from Primary 6", "count": count, "action": "graduated"})
 
-    # Lower-school top class (Nursery 2, level 3) promotes to Primary 1
-    if class_type == "lower" and level >= 3:
+    # Lower-school top class (Nursery 3, level 4) promotes to Primary 1
+    if class_type == "lower" and level >= 4:
         next_cls = conn.execute(
             "SELECT * FROM classes WHERE class_type='primary' AND level=1"
         ).fetchone()
