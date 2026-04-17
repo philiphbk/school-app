@@ -5,6 +5,7 @@
 const API = '';  // same-origin
 let currentUser = null;
 let appData = { classes: [], terms: [], subjects: [], pupils: [] };
+let _marksheetData = null;
 
 const DAYS_OF_WEEK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 
@@ -58,6 +59,17 @@ function hideToast() {
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
 
+function showLoginPage() {
+  localStorage.removeItem('token');
+  currentUser = null;
+  document.getElementById('app').classList.add('hidden');
+  document.getElementById('login-page').classList.remove('hidden');
+  const btn = document.getElementById('login-btn');
+  btn.textContent = 'Sign In';
+  btn.disabled = false;
+  document.getElementById('login-error').classList.add('hidden');
+}
+
 async function apiFetch(path, options = {}) {
   const token = localStorage.getItem('token');
   const headers = { 'Content-Type': 'application/json' };
@@ -65,14 +77,7 @@ async function apiFetch(path, options = {}) {
   const res = await fetch(API + path, { ...options, headers });
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && path !== '/api/auth/login') {
-    localStorage.removeItem('token');
-    currentUser = null;
-    document.getElementById('app').classList.add('hidden');
-    document.getElementById('login-page').classList.remove('hidden');
-    const btn = document.getElementById('login-btn');
-    btn.textContent = 'Sign In';
-    btn.disabled = false;
-    document.getElementById('login-error').classList.add('hidden');
+    showLoginPage();
     throw new Error('Session expired. Please sign in again.');
   }
   if (!res.ok) throw new Error(data.error || 'Request failed');
@@ -113,15 +118,7 @@ async function logout() {
   clearTimeout(_sessionTimer);
   clearTimeout(_sessionWarnTimer);
   try { await apiFetch('/api/auth/logout', { method: 'POST' }); } catch {}
-  localStorage.removeItem('token');
-  currentUser = null;
-  document.getElementById('app').classList.add('hidden');
-  document.getElementById('login-page').classList.remove('hidden');
-  // Reset login form so button is clickable again after logout
-  const btn = document.getElementById('login-btn');
-  btn.textContent = 'Sign In';
-  btn.disabled = false;
-  document.getElementById('login-error').classList.add('hidden');
+  showLoginPage();
   document.getElementById('login-password').value = '';
 }
 
@@ -1377,14 +1374,13 @@ function populateResultsSelects() {
 }
 
 async function loadResultsPage() {
-  populateResultsSelects();
   if (currentUser.role === 'teacher') {
     try {
       const me = await apiFetch('/api/auth/me');
       currentUser = me;
-      populateResultsSelects();
     } catch {}
   }
+  populateResultsSelects();
 }
 
 // ── SCORE CLAMP ────────────────────────────────────────────────────────────────
@@ -1431,7 +1427,7 @@ async function loadResultsGrid() {
     });
 
     // Store for saving
-    window._marksheetData = { pupils, subjects, classId, termId };
+    _marksheetData = { pupils, subjects, classId, termId };
 
     // Build header rows — two-level: subject name spans 2 cols (CA|Exam), then Total col
     const subjectHeaders = subjects.map(s =>
@@ -1542,7 +1538,7 @@ function msClampAndTotal(pupilId, maxVal, input) {
 }
 
 function msRecomputeTotal(pupilId) {
-  const { subjects } = window._marksheetData || {};
+  const { subjects } = _marksheetData || {};
   if (!subjects) return;
   let total = 0;
   let hasAny = false;
@@ -1557,7 +1553,7 @@ function msRecomputeTotal(pupilId) {
 }
 
 function collectPupilResults(pupilId, classId, termId) {
-  const { subjects } = window._marksheetData || {};
+  const { subjects } = _marksheetData || {};
   if (!subjects) return [];
   const results = [];
   subjects.forEach(s => {
@@ -1580,7 +1576,7 @@ function collectPupilResults(pupilId, classId, termId) {
 }
 
 async function saveOnePupilResults(pupilId) {
-  const { classId, termId } = window._marksheetData || {};
+  const { classId, termId } = _marksheetData || {};
   if (!classId || !termId) return;
   const results = collectPupilResults(pupilId, classId, termId);
   if (!results.length) return showToast('No scores entered for this pupil', 'error');
@@ -1596,7 +1592,7 @@ async function saveOnePupilResults(pupilId) {
 }
 
 async function saveAllMarksheetResults() {
-  const { pupils, classId, termId } = window._marksheetData || {};
+  const { pupils, classId, termId } = _marksheetData || {};
   if (!pupils || !classId || !termId) return;
   const results = [];
   pupils.forEach(p => {
@@ -1611,9 +1607,6 @@ async function saveAllMarksheetResults() {
   }
 }
 
-// Legacy stubs (kept so any old inline calls don't crash)
-function updateTotal(pupilId) { msRecomputeTotal(pupilId); }
-async function saveResultsGrid() { await saveAllMarksheetResults(); }
 
 // ─── ARCHIVE ──────────────────────────────────────────────────────────────────
 
@@ -1828,9 +1821,9 @@ async function changePassword(e) {
   if (pw !== confirm) return showToast('Passwords do not match', 'error');
   if (pw.length < 6) return showToast('Password must be at least 6 characters', 'error');
   try {
-    await apiFetch(`/api/teachers/${currentUser.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ password: pw })
+    await apiFetch('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ new_password: pw })
     });
     showToast('Password updated', 'success');
     e.target.reset();
@@ -3076,7 +3069,7 @@ async function exportFeesCSV() {
 // ─── BULK RESULTS IMPORT ──────────────────────────────────────────────────────
 
 function showBulkResultsImport() {
-  const { classId, termId, subjects } = window._marksheetData || {};
+  const { classId, termId, subjects } = _marksheetData || {};
   if (!classId || !termId) {
     showToast('Please load a marksheet first (select class and term)', 'error');
     return;
@@ -3122,7 +3115,7 @@ function previewImportCSV(event) {
         '<div class="empty" style="color:#dc2626">Missing required columns. Need: admission_number, subject_name, ca_score, exam_score</div>';
       return;
     }
-    const { pupils, subjects } = window._marksheetData || {};
+    const { pupils, subjects } = _marksheetData || {};
     _importedRows = [];
     const rows = lines.slice(1).map(line => {
       const cols = line.split(',').map(c => c.replace(/^"|"$/g,'').trim());

@@ -27,7 +27,7 @@ from email.mime.multipart import MIMEMultipart
 from urllib.parse import urlparse, parse_qs, quote
 import urllib.request
 import urllib.error
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as date_
 
 try:
     from weasyprint import HTML as WeasyHTML
@@ -760,32 +760,32 @@ def init_db():
             if 'full_name' in cols and 'name' not in cols:
                 c.execute("ALTER TABLE users RENAME COLUMN full_name TO name")
                 conn.commit()
-        except: pass
+        except Exception: pass
 
         try:
             c.execute("ALTER TABLE classes ADD COLUMN class_type TEXT DEFAULT 'primary'")
             conn.commit()
-        except: pass
+        except Exception: pass
 
         try:
             c.execute("ALTER TABLE sessions ADD COLUMN user_type TEXT DEFAULT 'staff'")
             conn.commit()
-        except: pass
+        except Exception: pass
 
         try:
             c.execute("ALTER TABLE fee_payments ADD COLUMN is_parent_payment INTEGER DEFAULT 0")
             conn.commit()
-        except: pass
+        except Exception: pass
 
         try:
             c.execute("ALTER TABLE parent_acknowledgments ADD COLUMN parent_account_id TEXT")
             conn.commit()
-        except: pass
+        except Exception: pass
 
         try:
             c.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
             conn.commit()
-        except: pass
+        except Exception: pass
 
         for migration in (
             "ALTER TABLE pupils ADD COLUMN allergies TEXT DEFAULT ''",
@@ -796,13 +796,13 @@ def init_db():
             try:
                 c.execute(migration)
                 conn.commit()
-            except:
+            except Exception:
                 pass
 
         try:
             c.execute("ALTER TABLE parent_accounts ADD COLUMN must_change_password INTEGER DEFAULT 0")
             conn.commit()
-        except: pass
+        except Exception: pass
 
         # Flag any existing admin still using the legacy default password as needing a change
         try:
@@ -810,7 +810,7 @@ def init_db():
             c.execute("""UPDATE users SET must_change_password=1
                          WHERE role='admin' AND password_hash=?""", (_legacy_default,))
             conn.commit()
-        except: pass
+        except Exception: pass
 
         ensure_admin_bootstrap(conn)
 
@@ -929,23 +929,21 @@ def clear_attempts(ip):
 
 def cleanup_expired_sessions():
     try:
-        conn = get_db()
-        conn.execute("DELETE FROM sessions WHERE expires_at <= datetime('now')")
-        conn.commit()
-        conn.close()
+        with db_conn() as conn:
+            conn.execute("DELETE FROM sessions WHERE expires_at <= datetime('now')")
+            conn.commit()
     except Exception:
         pass
 
 def write_audit(user, action, target_type=None, target_id=None, details=None, ip=None):
     try:
-        conn = get_db()
         uid = user["id"] if user else None
         uemail = user["email"] if user else None
-        conn.execute("""INSERT INTO audit_log (id, user_id, user_email, action, target_type, target_id, details, ip_address)
-                        VALUES (?,?,?,?,?,?,?,?)""",
-                     (str(uuid.uuid4()), uid, uemail, action, target_type, target_id, details, ip))
-        conn.commit()
-        conn.close()
+        with db_conn() as conn:
+            conn.execute("""INSERT INTO audit_log (id, user_id, user_email, action, target_type, target_id, details, ip_address)
+                            VALUES (?,?,?,?,?,?,?,?)""",
+                         (str(uuid.uuid4()), uid, uemail, action, target_type, target_id, details, ip))
+            conn.commit()
     except Exception:
         pass
 
@@ -964,7 +962,7 @@ def send_email_async(to_addr, subject, html_body):
                 server.login(SMTP_USER, SMTP_PASS)
                 server.sendmail(SMTP_FROM or SMTP_USER, to_addr, msg.as_string())
         except Exception as e:
-            print(f"Email send error: {e}")
+            LOGGER.error("Email send error to %s: %s", to_addr, e)
     t = threading.Thread(target=_send, daemon=True)
     t.start()
 
@@ -1118,16 +1116,15 @@ def get_json(url, headers=None):
 
 def log_notification(recipient_name, recipient_phone, recipient_email, channel, event_type, message, status, provider_response=""):
     try:
-        conn = get_db()
-        conn.execute(
-            """INSERT INTO notification_log
-               (id, recipient_name, recipient_phone, recipient_email, channel, event_type, message, status, provider_response)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
-            (str(uuid.uuid4()), recipient_name or "", recipient_phone or "", recipient_email or "",
-             channel, event_type, message, status, provider_response[:4000])
-        )
-        conn.commit()
-        conn.close()
+        with db_conn() as conn:
+            conn.execute(
+                """INSERT INTO notification_log
+                   (id, recipient_name, recipient_phone, recipient_email, channel, event_type, message, status, provider_response)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (str(uuid.uuid4()), recipient_name or "", recipient_phone or "", recipient_email or "",
+                 channel, event_type, message, status, provider_response[:4000])
+            )
+            conn.commit()
     except Exception:
         pass
 
@@ -1192,7 +1189,8 @@ def notify_parent_channels(pupil_row, message, event_type="general", prefer_what
     responses = []
     if prefer_whatsapp:
         responses.append(send_whatsapp(pupil_row.get("parent_phone"), message, pupil_row.get("parent_name"), pupil_row.get("parent_email"), event_type))
-    responses.append(send_sms(pupil_row.get("parent_phone"), message, pupil_row.get("parent_name"), pupil_row.get("parent_email"), event_type))
+    else:
+        responses.append(send_sms(pupil_row.get("parent_phone"), message, pupil_row.get("parent_name"), pupil_row.get("parent_email"), event_type))
     if send_email and pupil_row.get("parent_email"):
         send_email_async(pupil_row.get("parent_email"), f"GISL Schools Notification — {event_type.replace('_', ' ').title()}", f"<p>{message}</p>")
         log_notification(pupil_row.get("parent_name"), pupil_row.get("parent_phone"), pupil_row.get("parent_email"), "email", event_type, message, "sent", "SMTP async queued")
@@ -1259,6 +1257,24 @@ def send_pdf(handler, pdf_bytes, filename):
 
 # ─── API HANDLERS ─────────────────────────────────────────────────────────────
 
+def _complete_login(handler, conn, user, password, user_type, role, ip):
+    """Upgrade hash if needed, create session, and return a login response."""
+    table = "users" if user_type == "staff" else "parent_accounts"
+    if not user["password_hash"].startswith("pbkdf2$"):
+        new_hash = hash_password(password)
+        conn.execute(f"UPDATE {table} SET password_hash=? WHERE id=?", (new_hash, user["id"]))
+        conn.commit()
+    conn.close()
+    clear_attempts(ip)
+    cleanup_expired_sessions()
+    token = create_session(user["id"], user_type)
+    write_audit(dict(user), "login", ip=ip)
+    must_change = bool(user["must_change_password"]) if "must_change_password" in user.keys() else False
+    return send_json(handler, {"token": token, "user": {
+        "id": user["id"], "name": user["name"], "email": user["email"],
+        "role": role, "must_change_password": must_change
+    }})
+
 def handle_login(handler, body):
     email = body.get("email", "").strip().lower()
     password = body.get("password", "")
@@ -1274,39 +1290,11 @@ def handle_login(handler, body):
     # Try staff first
     user = conn.execute("SELECT * FROM users WHERE email = ? AND is_active = 1", (email,)).fetchone()
     if user and check_password(password, user["password_hash"]):
-        # Transparently upgrade old SHA-256 hash to PBKDF2
-        if not user["password_hash"].startswith("pbkdf2$"):
-            new_hash = hash_password(password)
-            conn.execute("UPDATE users SET password_hash=? WHERE id=?", (new_hash, user["id"]))
-            conn.commit()
-        conn.close()
-        clear_attempts(ip)
-        cleanup_expired_sessions()
-        token = create_session(user["id"], "staff")
-        write_audit(dict(user), "login", ip=ip)
-        must_change = bool(user["must_change_password"]) if "must_change_password" in user.keys() else False
-        return send_json(handler, {"token": token, "user": {
-            "id": user["id"], "name": user["name"], "email": user["email"],
-            "role": user["role"], "must_change_password": must_change
-        }})
+        return _complete_login(handler, conn, user, password, "staff", user["role"], ip)
     # Try parent
     parent = conn.execute("SELECT * FROM parent_accounts WHERE email = ? AND is_active = 1", (email,)).fetchone()
     if parent and check_password(password, parent["password_hash"]):
-        # Transparently upgrade old SHA-256 hash to PBKDF2
-        if not parent["password_hash"].startswith("pbkdf2$"):
-            new_hash = hash_password(password)
-            conn.execute("UPDATE parent_accounts SET password_hash=? WHERE id=?", (new_hash, parent["id"]))
-            conn.commit()
-        conn.close()
-        clear_attempts(ip)
-        cleanup_expired_sessions()
-        token = create_session(parent["id"], "parent")
-        write_audit(dict(parent), "login", ip=ip)
-        must_change = bool(parent["must_change_password"]) if "must_change_password" in parent.keys() else False
-        return send_json(handler, {"token": token, "user": {
-            "id": parent["id"], "name": parent["name"], "email": parent["email"],
-            "role": "parent", "must_change_password": must_change
-        }})
+        return _complete_login(handler, conn, parent, password, "parent", "parent", ip)
     conn.close()
     record_failed_attempt(ip)
     return send_error(handler, "Invalid email or password", 401)
@@ -4035,9 +4023,8 @@ def handle_download_report_pdf(handler, user, pupil_id, term_id):
     age_str = ""
     if dob:
         try:
-            from datetime import date as _date
-            b = _date.fromisoformat(dob)
-            today = _date.today()
+            b = date_.fromisoformat(dob)
+            today = date_.today()
             years = today.year - b.year - ((today.month, today.day) < (b.month, b.day))
             months = (today.month - b.month) % 12
             age_str = f"{years} Years {months} Months" if months else f"{years} Years"
@@ -4167,7 +4154,6 @@ class SchoolHandler(http.server.BaseHTTPRequestHandler):
 
         # API routes
         body = read_body(self) if method in ("POST", "PUT") else {}
-        token = get_token_from_request(self)
         user = get_current_user(self)
 
         # Public routes
